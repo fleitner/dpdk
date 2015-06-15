@@ -1001,8 +1001,9 @@ link_vmdq(struct vhost_dev *vdev, struct rte_mbuf *m)
 
 	/* Enable stripping of the vlan tag as we handle routing. */
 	if (vlan_strip)
-		rte_eth_dev_set_vlan_strip_on_queue(ports[0],
-			(uint16_t)vdev->vmdq_rx_q, 1);
+		for (i = 0; i < (int)rxq; i++)
+			rte_eth_dev_set_vlan_strip_on_queue(ports[0],
+				(uint16_t)(vdev->vmdq_rx_q + i), 1);
 
 	/* Set device as ready for RX. */
 	vdev->ready = DEVICE_RX;
@@ -1017,7 +1018,7 @@ link_vmdq(struct vhost_dev *vdev, struct rte_mbuf *m)
 static inline void
 unlink_vmdq(struct vhost_dev *vdev)
 {
-	unsigned i = 0;
+	unsigned i = 0, j = 0;
 	unsigned rx_count;
 	struct rte_mbuf *pkts_burst[MAX_PKT_BURST];
 
@@ -1030,15 +1031,19 @@ unlink_vmdq(struct vhost_dev *vdev)
 		vdev->vlan_tag = 0;
 
 		/*Clear out the receive buffers*/
-		rx_count = rte_eth_rx_burst(ports[0],
-					(uint16_t)vdev->vmdq_rx_q, pkts_burst, MAX_PKT_BURST);
-
-		while (rx_count) {
-			for (i = 0; i < rx_count; i++)
-				rte_pktmbuf_free(pkts_burst[i]);
-
+		for (i = 0; i < rxq; i++) {
 			rx_count = rte_eth_rx_burst(ports[0],
-					(uint16_t)vdev->vmdq_rx_q, pkts_burst, MAX_PKT_BURST);
+					(uint16_t)vdev->vmdq_rx_q + i,
+					pkts_burst, MAX_PKT_BURST);
+
+			while (rx_count) {
+				for (j = 0; j < rx_count; j++)
+					rte_pktmbuf_free(pkts_burst[j]);
+
+				rx_count = rte_eth_rx_burst(ports[0],
+					(uint16_t)vdev->vmdq_rx_q + i,
+					pkts_burst, MAX_PKT_BURST);
+			}
 		}
 
 		vdev->ready = DEVICE_MAC_LEARNING;
@@ -1050,7 +1055,7 @@ unlink_vmdq(struct vhost_dev *vdev)
  * the packet on that devices RX queue. If not then return.
  */
 static inline int __attribute__((always_inline))
-virtio_tx_local(struct vhost_dev *vdev, struct rte_mbuf *m)
+virtio_tx_local(struct vhost_dev *vdev, struct rte_mbuf *m, uint32_t q_idx)
 {
 	struct virtio_net_data_ll *dev_ll;
 	struct ether_hdr *pkt_hdr;
@@ -1065,7 +1070,7 @@ virtio_tx_local(struct vhost_dev *vdev, struct rte_mbuf *m)
 
 	while (dev_ll != NULL) {
 		if ((dev_ll->vdev->ready == DEVICE_RX) && ether_addr_cmp(&(pkt_hdr->d_addr),
-				          &dev_ll->vdev->mac_address)) {
+					&dev_ll->vdev->mac_address)) {
 
 			/* Drop the packet if the TX packet is destined for the TX device. */
 			if (dev_ll->vdev->dev->device_fh == dev->device_fh) {
@@ -1083,7 +1088,9 @@ virtio_tx_local(struct vhost_dev *vdev, struct rte_mbuf *m)
 				LOG_DEBUG(VHOST_DATA, "(%"PRIu64") Device is marked for removal\n", tdev->device_fh);
 			} else {
 				/*send the packet to the local virtio device*/
-				ret = rte_vhost_enqueue_burst(tdev, VIRTIO_RXQ, &m, 1);
+				ret = rte_vhost_enqueue_burst(tdev,
+					VIRTIO_RXQ + q_idx * VIRTIO_QNUM,
+					&m, 1);
 				if (enable_stats) {
 					rte_atomic64_add(
 					&dev_statistics[tdev->device_fh].rx_total_atomic,
@@ -1160,7 +1167,8 @@ find_local_dest(struct virtio_net *dev, struct rte_mbuf *m,
  * or the physical port.
  */
 static inline void __attribute__((always_inline))
-virtio_tx_route(struct vhost_dev *vdev, struct rte_mbuf *m, uint16_t vlan_tag)
+virtio_tx_route(struct vhost_dev *vdev, struct rte_mbuf *m,
+		uint16_t vlan_tag, uint32_t q_idx)
 {
 	struct mbuf_table *tx_q;
 	struct rte_mbuf **m_table;
@@ -1170,7 +1178,8 @@ virtio_tx_route(struct vhost_dev *vdev, struct rte_mbuf *m, uint16_t vlan_tag)
 	struct ether_hdr *nh;
 
 	/*check if destination is local VM*/
-	if ((vm2vm_mode == VM2VM_SOFTWARE) && (virtio_tx_local(vdev, m) == 0)) {
+	if ((vm2vm_mode == VM2VM_SOFTWARE) &&
+		(virtio_tx_local(vdev, m, q_idx) == 0)) {
 		rte_pktmbuf_free(m);
 		return;
 	}
@@ -1334,49 +1343,60 @@ switch_worker(__attribute__((unused)) void *arg)
 			}
 			if (likely(vdev->ready == DEVICE_RX)) {
 				/*Handle guest RX*/
-				rx_count = rte_eth_rx_burst(ports[0],
-					vdev->vmdq_rx_q, pkts_burst, MAX_PKT_BURST);
+				for (i = 0; i < rxq; i++) {
+					rx_count = rte_eth_rx_burst(ports[0],
+						vdev->vmdq_rx_q + i, pkts_burst, MAX_PKT_BURST);
 
-				if (rx_count) {
-					/*
-					* Retry is enabled and the queue is full then we wait and retry to avoid packet loss
-					* Here MAX_PKT_BURST must be less than virtio queue size
-					*/
-					if (enable_retry && unlikely(rx_count > rte_vring_available_entries(dev, VIRTIO_RXQ))) {
-						for (retry = 0; retry < burst_rx_retry_num; retry++) {
-							rte_delay_us(burst_rx_delay_time);
-							if (rx_count <= rte_vring_available_entries(dev, VIRTIO_RXQ))
-								break;
+					if (rx_count) {
+						/*
+						* Retry is enabled and the queue is full then we wait and retry to avoid packet loss
+						* Here MAX_PKT_BURST must be less than virtio queue size
+						*/
+						if (enable_retry && unlikely(rx_count > rte_vring_available_entries(dev,
+											VIRTIO_RXQ + i * VIRTIO_QNUM))) {
+							for (retry = 0; retry < burst_rx_retry_num; retry++) {
+								rte_delay_us(burst_rx_delay_time);
+								if (rx_count <= rte_vring_available_entries(dev,
+											VIRTIO_RXQ + i * VIRTIO_QNUM))
+									break;
+							}
+						}
+						ret_count = rte_vhost_enqueue_burst(dev, VIRTIO_RXQ + i * VIRTIO_QNUM,
+											pkts_burst, rx_count);
+						if (enable_stats) {
+							rte_atomic64_add(
+							&dev_statistics[dev_ll->vdev->dev->device_fh].rx_total_atomic,
+							rx_count);
+							rte_atomic64_add(
+							&dev_statistics[dev_ll->vdev->dev->device_fh].rx_atomic, ret_count);
+						}
+						while (likely(rx_count)) {
+							rx_count--;
+							rte_pktmbuf_free(pkts_burst[rx_count]);
 						}
 					}
-					ret_count = rte_vhost_enqueue_burst(dev, VIRTIO_RXQ, pkts_burst, rx_count);
-					if (enable_stats) {
-						rte_atomic64_add(
-						&dev_statistics[dev_ll->vdev->dev->device_fh].rx_total_atomic,
-						rx_count);
-						rte_atomic64_add(
-						&dev_statistics[dev_ll->vdev->dev->device_fh].rx_atomic, ret_count);
-					}
-					while (likely(rx_count)) {
-						rx_count--;
-						rte_pktmbuf_free(pkts_burst[rx_count]);
-					}
-
 				}
 			}
 
 			if (likely(!vdev->remove)) {
 				/* Handle guest TX*/
-				tx_count = rte_vhost_dequeue_burst(dev, VIRTIO_TXQ, mbuf_pool, pkts_burst, MAX_PKT_BURST);
-				/* If this is the first received packet we need to learn the MAC and setup VMDQ */
-				if (unlikely(vdev->ready == DEVICE_MAC_LEARNING) && tx_count) {
-					if (vdev->remove || (link_vmdq(vdev, pkts_burst[0]) == -1)) {
-						while (tx_count)
-							rte_pktmbuf_free(pkts_burst[--tx_count]);
+				for (i = 0; i < rxq; i++) {
+					tx_count = rte_vhost_dequeue_burst(dev, VIRTIO_TXQ + i * 2,
+							mbuf_pool, pkts_burst, MAX_PKT_BURST);
+					/*
+					 * If this is the first received packet we need to learn
+					 * the MAC and setup VMDQ
+					 */
+					if (unlikely(vdev->ready == DEVICE_MAC_LEARNING) && tx_count) {
+						if (vdev->remove || (link_vmdq(vdev, pkts_burst[0]) == -1)) {
+							while (tx_count)
+								rte_pktmbuf_free(pkts_burst[--tx_count]);
+						}
 					}
+					while (tx_count)
+						virtio_tx_route(vdev, pkts_burst[--tx_count],
+								(uint16_t)dev->device_fh, i);
 				}
-				while (tx_count)
-					virtio_tx_route(vdev, pkts_burst[--tx_count], (uint16_t)dev->device_fh);
 			}
 
 			/*move to the next device in the list*/
@@ -2635,6 +2655,13 @@ new_device (struct virtio_net *dev)
 	struct vhost_dev *vdev;
 	uint32_t regionidx;
 
+	if ((rxq > 1) && (dev->num_virt_queues != rxq)) {
+		RTE_LOG(ERR, VHOST_DATA, "(%"PRIu64") queue num in VMDq pool:"
+			"%d != queue pair num in vhost dev:%d\n",
+			dev->device_fh, rxq, dev->num_virt_queues);
+		return -1;
+	}
+
 	vdev = rte_zmalloc("vhost device", sizeof(*vdev), RTE_CACHE_LINE_SIZE);
 	if (vdev == NULL) {
 		RTE_LOG(INFO, VHOST_DATA, "(%"PRIu64") Couldn't allocate memory for vhost dev\n",
@@ -2680,12 +2707,12 @@ new_device (struct virtio_net *dev)
 		}
 	}
 
-
 	/* Add device to main ll */
 	ll_dev = get_data_ll_free_entry(&ll_root_free);
 	if (ll_dev == NULL) {
-		RTE_LOG(INFO, VHOST_DATA, "(%"PRIu64") No free entry found in linked list. Device limit "
-			"of %d devices per core has been reached\n",
+		RTE_LOG(INFO, VHOST_DATA,
+			"(%"PRIu64") No free entry found in linked list."
+			"Device limit of %d devices per core has been reached\n",
 			dev->device_fh, num_devices);
 		if (vdev->regions_hpa)
 			rte_free(vdev->regions_hpa);
@@ -2694,8 +2721,7 @@ new_device (struct virtio_net *dev)
 	}
 	ll_dev->vdev = vdev;
 	add_data_ll_entry(&ll_root_used, ll_dev);
-	vdev->vmdq_rx_q
-		= dev->device_fh * queues_per_pool + vmdq_queue_base;
+	vdev->vmdq_rx_q	= dev->device_fh * rxq + vmdq_queue_base;
 
 	if (zero_copy) {
 		uint32_t index = vdev->vmdq_rx_q;
