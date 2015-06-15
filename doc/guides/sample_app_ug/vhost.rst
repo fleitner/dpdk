@@ -514,6 +514,13 @@ It is enabled by default.
 
     user@target:~$ ./build/app/vhost-switch -c f -n 4 --huge-dir /mnt/huge -- --vlan-strip [0, 1]
 
+**rxq.**
+The rxq option specify the rx queue number per VMDq pool, it is 1 on default.
+
+.. code-block:: console
+
+    user@target:~$ ./build/app/vhost-switch -c f -n 4 --huge-dir /mnt/huge -- --rxq [1, 2, 4]
+
 Running the Virtual Machine (QEMU)
 ----------------------------------
 
@@ -833,3 +840,106 @@ For example:
 The above message indicates that device 0 has been registered with MAC address cc:bb:bb:bb:bb:bb and VLAN tag 1000.
 Any packets received on the NIC with these values is placed on the devices receive queue.
 When a virtio-net device transmits packets, the VLAN tag is added to the packet by the DPDK vhost sample code.
+
+Vhost multiple queues
+---------------------
+
+This feature supports the multiple queues for each virtio device in vhost.
+The vhost-user is used to enable the multiple queues feature, It's not ready for vhost-cuse.
+
+The QEMU patch of enabling vhost-use multiple queues has already merged into upstream sub-tree in
+QEMU community and it will be put in QEMU 2.4. If using QEMU 2.3, it requires applying the
+same patch onto QEMU 2.3 and rebuild the QEMU before running vhost multiple queues:
+http://patchwork.ozlabs.org/patch/477461/
+
+Basically vhost sample leverages the VMDq+RSS in HW to receive packets and distribute them
+into different queue in the pool according to their 5 tuples.
+
+On the other hand, the vhost will get the queue pair number based on the communication message with
+QEMU.
+
+HW queue numbers in pool is strongly recommended to set as identical with the queue number to start
+the QMEU guest and identical with the queue number to start with virtio port on guest.
+E.g. use '--rxq 4' to set the queue number as 4, it means there are 4 HW queues in each VMDq pool,
+and 4 queues in each vhost device/port, every queue in pool maps to one queue in vhost device.
+
+=========================================
+==================|   |==================|
+       vport0     |   |      vport1      |
+---  ---  ---  ---|   |---  ---  ---  ---|
+q0 | q1 | q2 | q3 |   |q0 | q1 | q2 | q3 |
+/\= =/\= =/\= =/\=|   |/\= =/\= =/\= =/\=|
+||   ||   ||   ||      ||   ||   ||   ||
+||   ||   ||   ||      ||   ||   ||   ||
+||= =||= =||= =||=|   =||== ||== ||== ||=|
+q0 | q1 | q2 | q3 |   |q0 | q1 | q2 | q3 |
+------------------|   |------------------|
+     VMDq pool0   |   |    VMDq pool1    |
+==================|   |==================|
+
+In RX side, it firstly polls each queue of the pool and gets the packets from
+it and enqueue them into its corresponding virtqueue in virtio device/port.
+In TX side, it dequeue packets from each virtqueue of virtio device/port and send
+to either physical port or another virtio device according to its destination
+MAC address.
+
+
+Test guidance
+~~~~~~~~~~~~~
+
+#.  On host, firstly mount hugepage, and insmod uio, igb_uio, bind one nic on igb_uio;
+    and then run vhost sample, key steps as follows:
+
+.. code-block:: console
+
+    sudo mount -t hugetlbfs nodev /mnt/huge
+    sudo modprobe uio
+    sudo insmod $RTE_SDK/$RTE_TARGET/kmod/igb_uio.ko
+
+    $RTE_SDK/tools/dpdk_nic_bind.py --bind igb_uio 0000:08:00.0
+    sudo $RTE_SDK/examples/vhost/build/vhost-switch -c 0xf0 -n 4 --huge-dir \
+    /mnt/huge --socket-mem 1024,0 -- -p 1 --vm2vm 0 --dev-basename usvhost --rxq 2
+
+.. note::
+
+    use '--stats 1' to enable the stats dumping on screen for vhost.
+
+#.  After step 1, on host, modprobe kvm and kvm_intel, and use qemu command line to start one guest:
+
+.. code-block:: console
+
+    modprobe kvm
+    modprobe kvm_intel
+    sudo mount -t hugetlbfs nodev /dev/hugepages -o pagesize=1G
+
+    $QEMU_PATH/qemu-system-x86_64 -enable-kvm -m 4096 \
+    -object memory-backend-file,id=mem,size=4096M,mem-path=/dev/hugepages,share=on \
+    -numa node,memdev=mem -mem-prealloc -smp 10 -cpu core2duo,+sse3,+sse4.1,+sse4.2 \
+    -name <vm-name> -drive file=<img-path>/vm.img \
+    -chardev socket,id=char0,path=<usvhost-path>/usvhost \
+    -netdev type=vhost-user,id=hostnet2,chardev=char0,vhostforce=on,queues=2 \
+    -device virtio-net-pci,mq=on,vectors=6,netdev=hostnet2,id=net2,mac=52:54:00:12:34:56,csum=off,gso=off,guest_tso4=off,guest_tso6=off,guest_ecn=off \
+    -chardev socket,id=char1,path=<usvhost-path>/usvhost \
+    -netdev type=vhost-user,id=hostnet3,chardev=char1,vhostforce=on,queues=2 \
+    -device virtio-net-pci,mq=on,vectors=6,netdev=hostnet3,id=net3,mac=52:54:00:12:34:57,csum=off,gso=off,guest_tso4=off,guest_tso6=off,guest_ecn=off
+
+#.  Log on guest, use testpmd(dpdk based) to test, use multiple virtio queues to rx and tx packets.
+
+.. code-block:: console
+
+    modprobe uio
+    insmod $RTE_SDK/$RTE_TARGET/kmod/igb_uio.ko
+    echo 1024 > /sys/devices/system/node/node0/hugepages/hugepages-2048kB/nr_hugepages
+    ./tools/dpdk_nic_bind.py --bind igb_uio 00:03.0 00:04.0
+
+    $RTE_SDK/$RTE_TARGET/app/testpmd -c 1f -n 4 -- --rxq=2 --txq=2 --nb-cores=4 \
+    --rx-queue-stats-mapping="(0,0,0),(0,1,1),(1,0,2),(1,1,3)" \
+    --tx-queue-stats-mapping="(0,0,0),(0,1,1),(1,0,2),(1,1,3)" -i --disable-hw-vlan --txqflags 0xf00
+
+    set fwd mac
+    start tx_first
+
+#.  Use packet generator to send packets with dest MAC:52 54 00 12 34 57  VLAN tag:1001,
+    select IPv4 as protocols and continuous incremental IP address.
+
+#.  Testpmd on guest can display packets received/transmitted in both queues of each virtio port.

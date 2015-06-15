@@ -128,6 +128,41 @@ VHOST_GET_VRING_BASE is used as the signal to remove vhost device from data plan
 
 When the socket connection is closed, vhost will destroy the device.
 
+Vhost multiple queues feature
+-----------------------------
+This feature supports the multiple queues for each virtio device in vhost.
+The vhost-user is used to enable the multiple queues feature, It's not ready for vhost-cuse.
+
+The QEMU patch of enabling vhost-use multiple queues has already merged into upstream sub-tree in
+QEMU community and it will be put in QEMU 2.4. If using QEMU 2.3, it requires applying the
+same patch onto QEMU 2.3 and rebuild the QEMU before running vhost multiple queues:
+http://patchwork.ozlabs.org/patch/477461/
+
+The vhost will get the queue pair number based on the communication message with QEMU.
+
+HW queue numbers in pool is strongly recommended to set as identical with the queue number to start
+the QMEU guest and identical with the queue number to start with virtio port on guest.
+
+=========================================
+==================|   |==================|
+       vport0     |   |      vport1      |
+---  ---  ---  ---|   |---  ---  ---  ---|
+q0 | q1 | q2 | q3 |   |q0 | q1 | q2 | q3 |
+/\= =/\= =/\= =/\=|   |/\= =/\= =/\= =/\=|
+||   ||   ||   ||      ||   ||   ||   ||
+||   ||   ||   ||      ||   ||   ||   ||
+||= =||= =||= =||=|   =||== ||== ||== ||=|
+q0 | q1 | q2 | q3 |   |q0 | q1 | q2 | q3 |
+------------------|   |------------------|
+     VMDq pool0   |   |    VMDq pool1    |
+==================|   |==================|
+
+In RX side, it firstly polls each queue of the pool and gets the packets from
+it and enqueue them into its corresponding virtqueue in virtio device/port.
+In TX side, it dequeue packets from each virtqueue of virtio device/port and send
+to either physical port or another virtio device according to its destination
+MAC address.
+
 Vhost supported vSwitch reference
 ---------------------------------
 
