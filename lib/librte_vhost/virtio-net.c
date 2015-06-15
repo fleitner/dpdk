@@ -553,6 +553,7 @@ set_vring_addr(struct vhost_device_ctx ctx, struct vhost_vring_addr *addr)
 {
 	struct virtio_net *dev;
 	struct vhost_virtqueue *vq;
+	uint32_t i;
 
 	dev = get_device(ctx);
 	if (dev == NULL)
@@ -579,6 +580,15 @@ set_vring_addr(struct vhost_device_ctx ctx, struct vhost_vring_addr *addr)
 			dev->device_fh);
 		return -1;
 	}
+
+	for (i = vq->last_used_idx; i < vq->avail->idx; i++)
+		if (vq->avail->ring[i] >= vq->size) {
+			RTE_LOG(ERR, VHOST_CONFIG, "%s (%"PRIu64"):"
+				"Please check virt queue pair idx:%d is "
+				"enalbed correctly on guest.\n", __func__,
+				dev->device_fh, addr->index / VIRTIO_QNUM);
+			return -1;
+		}
 
 	vq->used = (struct vring_used *)(uintptr_t)qva_to_vva(dev,
 			addr->index / VIRTIO_QNUM, addr->used_user_addr);

@@ -398,7 +398,16 @@ vserver_message_handler(int connfd, void *dat, int *remove)
 		ops->set_vring_num(ctx, &msg.payload.state);
 		break;
 	case VHOST_USER_SET_VRING_ADDR:
-		ops->set_vring_addr(ctx, &msg.payload.addr);
+		if (ops->set_vring_addr(ctx, &msg.payload.addr) != 0) {
+			RTE_LOG(ERR, VHOST_CONFIG,
+				"error found in vhost set vring,"
+				"the vhost device will destroy\n");
+			close(connfd);
+			*remove = 1;
+			free(cfd_ctx);
+			user_destroy_device(ctx);
+			ops->destroy_device(ctx);
+		}
 		break;
 	case VHOST_USER_SET_VRING_BASE:
 		ops->set_vring_base(ctx, &msg.payload.state);
