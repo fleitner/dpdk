@@ -3311,16 +3311,16 @@ void ixgbe_configure_dcb(struct rte_eth_dev *dev)
 	return;
 }
 
-/*
- * VMDq only support for 10 GbE NIC.
+/**
+ * Config pool for VMDq on 10 GbE NIC.
  */
 static void
-ixgbe_vmdq_rx_hw_configure(struct rte_eth_dev *dev)
+ixgbe_vmdq_pool_configure(struct rte_eth_dev *dev)
 {
 	struct rte_eth_vmdq_rx_conf *cfg;
 	struct ixgbe_hw *hw;
 	enum rte_eth_nb_pools num_pools;
-	uint32_t mrqc, vt_ctl, vlanctrl;
+	uint32_t vt_ctl, vlanctrl;
 	uint32_t vmolr = 0;
 	int i;
 
@@ -3328,12 +3328,6 @@ ixgbe_vmdq_rx_hw_configure(struct rte_eth_dev *dev)
 	hw = IXGBE_DEV_PRIVATE_TO_HW(dev->data->dev_private);
 	cfg = &dev->data->dev_conf.rx_adv_conf.vmdq_rx_conf;
 	num_pools = cfg->nb_queue_pools;
-
-	ixgbe_rss_disable(dev);
-
-	/* MRQC: enable vmdq */
-	mrqc = IXGBE_MRQC_VMDQEN;
-	IXGBE_WRITE_REG(hw, IXGBE_MRQC, mrqc);
 
 	/* PFVTCTL: turn on virtualisation and set the default pool */
 	vt_ctl = IXGBE_VT_CTL_VT_ENABLE | IXGBE_VT_CTL_REPLEN;
@@ -3400,7 +3394,29 @@ ixgbe_vmdq_rx_hw_configure(struct rte_eth_dev *dev)
 	IXGBE_WRITE_FLUSH(hw);
 }
 
-/*
+/**
+ * VMDq only support for 10 GbE NIC.
+ */
+static void
+ixgbe_vmdq_rx_hw_configure(struct rte_eth_dev *dev)
+{
+	struct ixgbe_hw *hw;
+	uint32_t mrqc;
+
+	PMD_INIT_FUNC_TRACE();
+	hw = IXGBE_DEV_PRIVATE_TO_HW(dev->data->dev_private);
+
+	ixgbe_rss_disable(dev);
+
+	/* MRQC: enable vmdq */
+	mrqc = IXGBE_MRQC_VMDQEN;
+	IXGBE_WRITE_REG(hw, IXGBE_MRQC, mrqc);
+	IXGBE_WRITE_FLUSH(hw);
+
+	ixgbe_vmdq_pool_configure(dev);
+}
+
+/**
  * ixgbe_dcb_config_tx_hw_config - Configure general VMDq TX parameters
  * @hw: pointer to hardware structure
  */
@@ -3505,6 +3521,41 @@ ixgbe_config_vf_rss(struct rte_eth_dev *dev)
 }
 
 static int
+ixgbe_config_vmdq_rss(struct rte_eth_dev *dev)
+{
+	struct ixgbe_hw *hw;
+	uint32_t mrqc;
+
+	ixgbe_rss_configure(dev);
+
+	hw = IXGBE_DEV_PRIVATE_TO_HW(dev->data->dev_private);
+
+	/* MRQC: enable VMDQ RSS */
+	mrqc = IXGBE_READ_REG(hw, IXGBE_MRQC);
+	mrqc &= ~IXGBE_MRQC_MRQE_MASK;
+
+	switch (RTE_ETH_DEV_SRIOV(dev).nb_q_per_pool) {
+	case 2:
+		mrqc |= IXGBE_MRQC_VMDQRSS64EN;
+		break;
+
+	case 4:
+		mrqc |= IXGBE_MRQC_VMDQRSS32EN;
+		break;
+
+	default:
+		PMD_INIT_LOG(ERR, "Invalid pool number in non-IOV mode with VMDQ RSS");
+		return -EINVAL;
+	}
+
+	IXGBE_WRITE_REG(hw, IXGBE_MRQC, mrqc);
+
+	ixgbe_vmdq_pool_configure(dev);
+
+	return 0;
+}
+
+static int
 ixgbe_config_vf_default(struct rte_eth_dev *dev)
 {
 	struct ixgbe_hw *hw =
@@ -3558,6 +3609,10 @@ ixgbe_dev_mq_rx_configure(struct rte_eth_dev *dev)
 
 			case ETH_MQ_RX_VMDQ_ONLY:
 				ixgbe_vmdq_rx_hw_configure(dev);
+				break;
+
+			case ETH_MQ_RX_VMDQ_RSS:
+				ixgbe_config_vmdq_rss(dev);
 				break;
 
 			case ETH_MQ_RX_NONE:
@@ -4038,6 +4093,8 @@ ixgbe_dev_rx_init(struct rte_eth_dev *dev)
 
 	/* Setup RX queues */
 	for (i = 0; i < dev->data->nb_rx_queues; i++) {
+		uint32_t psrtype = 0;
+
 		rxq = dev->data->rx_queues[i];
 
 		/*
@@ -4065,12 +4122,10 @@ ixgbe_dev_rx_init(struct rte_eth_dev *dev)
 		if (rx_conf->header_split) {
 			if (hw->mac.type == ixgbe_mac_82599EB) {
 				/* Must setup the PSRTYPE register */
-				uint32_t psrtype;
 				psrtype = IXGBE_PSRTYPE_TCPHDR |
 					IXGBE_PSRTYPE_UDPHDR   |
 					IXGBE_PSRTYPE_IPV4HDR  |
 					IXGBE_PSRTYPE_IPV6HDR;
-				IXGBE_WRITE_REG(hw, IXGBE_PSRTYPE(rxq->reg_idx), psrtype);
 			}
 			srrctl = ((rx_conf->split_hdr_size <<
 				IXGBE_SRRCTL_BSIZEHDRSIZE_SHIFT) &
@@ -4079,6 +4134,11 @@ ixgbe_dev_rx_init(struct rte_eth_dev *dev)
 		} else
 #endif
 			srrctl = IXGBE_SRRCTL_DESCTYPE_ADV_ONEBUF;
+
+		/* Set RQPL for VMDQ RSS according to max Rx queue */
+		psrtype |= (RTE_ETH_DEV_SRIOV(dev).nb_q_per_pool >> 1) <<
+			IXGBE_PSRTYPE_RQPL_SHIFT;
+		IXGBE_WRITE_REG(hw, IXGBE_PSRTYPE(rxq->reg_idx), psrtype);
 
 		/* Set if packets are dropped when no descriptors available */
 		if (rxq->drop_en)

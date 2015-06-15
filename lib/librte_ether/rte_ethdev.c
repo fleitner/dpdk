@@ -933,6 +933,16 @@ rte_eth_dev_check_vf_rss_rxq_num(uint8_t port_id, uint16_t nb_rx_q)
 	return 0;
 }
 
+#define VMDQ_RSS_RX_QUEUE_NUM_MAX 4
+
+static int
+rte_eth_dev_check_vmdq_rss_rxq_num(__rte_unused uint8_t port_id, uint16_t nb_rx_q)
+{
+	if (nb_rx_q > VMDQ_RSS_RX_QUEUE_NUM_MAX)
+		return -EINVAL;
+	return 0;
+}
+
 static int
 rte_eth_dev_check_mq_mode(uint8_t port_id, uint16_t nb_rx_q, uint16_t nb_tx_q,
 		      const struct rte_eth_conf *dev_conf)
@@ -1090,6 +1100,36 @@ rte_eth_dev_check_mq_mode(uint8_t port_id, uint16_t nb_rx_q, uint16_t nb_tx_q,
 						"nb_tcs != %d or nb_tcs "
 						"!= %d\n",
 						port_id, ETH_4_TCS, ETH_8_TCS);
+				return -EINVAL;
+			}
+		}
+
+		if (dev_conf->rxmode.mq_mode == ETH_MQ_RX_VMDQ_RSS) {
+			uint32_t nb_queue_pools =
+				dev_conf->rx_adv_conf.vmdq_rx_conf.nb_queue_pools;
+			struct rte_eth_dev_info dev_info;
+
+			rte_eth_dev_info_get(port_id, &dev_info);
+			dev->data->dev_conf.rxmode.mq_mode = ETH_MQ_RX_VMDQ_RSS;
+			if (nb_queue_pools == ETH_32_POOLS || nb_queue_pools == ETH_64_POOLS)
+				RTE_ETH_DEV_SRIOV(dev).nb_q_per_pool =
+					dev_info.max_rx_queues/nb_queue_pools;
+			else {
+				PMD_DEBUG_TRACE("ethdev port_id=%d VMDQ "
+						"nb_queue_pools=%d invalid "
+						"in VMDQ RSS\n"
+						port_id,
+						nb_queue_pools);
+				return -EINVAL;
+			}
+
+			if (rte_eth_dev_check_vmdq_rss_rxq_num(port_id,
+				RTE_ETH_DEV_SRIOV(dev).nb_q_per_pool) != 0) {
+				PMD_DEBUG_TRACE("ethdev port_id=%d"
+					" SRIOV active, invalid queue"
+					" number for VMDQ RSS, allowed"
+					" value are 1, 2 or 4\n",
+					port_id);
 				return -EINVAL;
 			}
 		}
