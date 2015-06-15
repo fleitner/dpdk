@@ -163,6 +163,9 @@ static int mergeable;
 /* Do vlan strip on host, enabled on default */
 static uint32_t vlan_strip = 1;
 
+/* Rx queue number per virtio device */
+static uint32_t rxq = 1;
+
 /* number of descriptors to apply*/
 static uint32_t num_rx_descriptor = RTE_TEST_RX_DESC_DEFAULT_ZCP;
 static uint32_t num_tx_descriptor = RTE_TEST_TX_DESC_DEFAULT_ZCP;
@@ -408,8 +411,19 @@ port_init(uint8_t port)
 		txconf->tx_deferred_start = 1;
 	}
 
-	/*configure the number of supported virtio devices based on VMDQ limits */
-	num_devices = dev_info.max_vmdq_pools;
+	/* Configure the virtio devices num based on VMDQ limits */
+	switch (rxq) {
+	case 1:
+	case 2:
+		num_devices = dev_info.max_vmdq_pools;
+		break;
+	case 4:
+		num_devices = dev_info.max_vmdq_pools / 2;
+		break;
+	default:
+		RTE_LOG(ERR, VHOST_CONFIG, "rxq invalid for VMDq.\n");
+		return -1;
+	}
 
 	if (zero_copy) {
 		rx_ring_size = num_rx_descriptor;
@@ -431,7 +445,7 @@ port_init(uint8_t port)
 		return retval;
 	/* NIC queues are divided into pf queues and vmdq queues.  */
 	num_pf_queues = dev_info.max_rx_queues - dev_info.vmdq_queue_num;
-	queues_per_pool = dev_info.vmdq_queue_num / dev_info.max_vmdq_pools;
+	queues_per_pool = dev_info.vmdq_queue_num / num_devices;
 	num_vmdq_queues = num_devices * queues_per_pool;
 	num_queues = num_pf_queues + num_vmdq_queues;
 	vmdq_queue_base = dev_info.vmdq_queue_base;
@@ -576,7 +590,8 @@ us_vhost_usage(const char *prgname)
 	"		--rx-desc-num [0-N]: the number of descriptors on rx, "
 			"used only when zero copy is enabled.\n"
 	"		--tx-desc-num [0-N]: the number of descriptors on tx, "
-			"used only when zero copy is enabled.\n",
+			"used only when zero copy is enabled.\n"
+	"		--rxq [1,2,4]: rx queue number for each vhost device\n",
 	       prgname);
 }
 
@@ -602,6 +617,7 @@ us_vhost_parse_args(int argc, char **argv)
 		{"zero-copy", required_argument, NULL, 0},
 		{"rx-desc-num", required_argument, NULL, 0},
 		{"tx-desc-num", required_argument, NULL, 0},
+		{"rxq", required_argument, NULL, 0},
 		{NULL, 0, 0, 0},
 	};
 
@@ -778,6 +794,18 @@ us_vhost_parse_args(int argc, char **argv)
 				}
 			}
 
+			/* Specify the Rx queue number for each vhost dev. */
+			if (!strncmp(long_option[option_index].name,
+				"rxq", MAX_LONG_OPT_SZ)) {
+				ret = parse_num_opt(optarg, 4);
+				if ((ret == -1) || (ret == 0) || (!POWEROF2(ret))) {
+					RTE_LOG(INFO, VHOST_CONFIG,
+					"Valid value for rxq is [1,2,4]\n");
+					us_vhost_usage(prgname);
+					return -1;
+				} else
+					rxq = ret;
+			}
 			break;
 
 			/* Invalid option - print options. */
@@ -810,6 +838,19 @@ us_vhost_parse_args(int argc, char **argv)
 			"Vhost zero copy doesn't support jumbo frame,"
 			"please specify '--mergeable 0' to disable the "
 			"mergeable feature.\n");
+		return -1;
+	}
+
+	if (rxq > 1) {
+		vmdq_conf_default.rxmode.mq_mode = ETH_MQ_RX_VMDQ_RSS;
+		vmdq_conf_default.rx_adv_conf.rss_conf.rss_hf = ETH_RSS_IP |
+				ETH_RSS_UDP | ETH_RSS_TCP | ETH_RSS_SCTP;
+	}
+
+	if ((zero_copy == 1) && (rxq > 1)) {
+		RTE_LOG(INFO, VHOST_PORT,
+			"Vhost zero copy doesn't support mq mode,"
+			"please specify '--rxq 1' to disable it.\n");
 		return -1;
 	}
 
