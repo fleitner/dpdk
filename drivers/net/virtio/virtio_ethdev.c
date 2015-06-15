@@ -61,6 +61,7 @@
 #include "virtio_logs.h"
 #include "virtqueue.h"
 
+#define CQ_POLL_COUNTER 500 /* Avoid dead loop when polling control queue */
 
 static int eth_virtio_dev_init(struct rte_eth_dev *eth_dev);
 static int  virtio_dev_configure(struct rte_eth_dev *dev);
@@ -118,6 +119,7 @@ virtio_send_command(struct virtqueue *vq, struct virtio_pmd_ctrl *ctrl,
 	int k, sum = 0;
 	virtio_net_ctrl_ack status = ~0;
 	struct virtio_pmd_ctrl result;
+	uint32_t cq_poll = CQ_POLL_COUNTER;
 
 	ctrl->status = status;
 
@@ -178,9 +180,15 @@ virtio_send_command(struct virtqueue *vq, struct virtio_pmd_ctrl *ctrl,
 	virtqueue_notify(vq);
 
 	rte_rmb();
-	while (vq->vq_used_cons_idx == vq->vq_ring.used->idx) {
+
+	/**
+	 * FIXME: The control queue doesn't work for vhost-user
+	 * multiple queue, introduce poll_ms to avoid the deadloop.
+	 */
+	while ((vq->vq_used_cons_idx == vq->vq_ring.used->idx) && (cq_poll != 0)) {
 		rte_rmb();
 		usleep(100);
+		cq_poll--;
 	}
 
 	while (vq->vq_used_cons_idx != vq->vq_ring.used->idx) {
@@ -208,7 +216,10 @@ virtio_send_command(struct virtqueue *vq, struct virtio_pmd_ctrl *ctrl,
 	PMD_INIT_LOG(DEBUG, "vq->vq_free_cnt=%d\nvq->vq_desc_head_idx=%d",
 			vq->vq_free_cnt, vq->vq_desc_head_idx);
 
-	memcpy(&result, vq->virtio_net_hdr_mz->addr,
+	if (cq_poll == 0)
+		result.status = 0;
+	else
+		memcpy(&result, vq->virtio_net_hdr_mz->addr,
 			sizeof(struct virtio_pmd_ctrl));
 
 	return result.status;
