@@ -273,28 +273,32 @@ cuse_set_mem_table(struct vhost_device_ctx ctx,
 		((uint64_t)(uintptr_t)mem_regions_addr + size);
 	uint64_t base_address = 0, mapped_address, mapped_size;
 	struct virtio_net *dev;
+	struct virtio_memory *dev_mem = NULL;
 
 	dev = get_device(ctx);
 	if (dev == NULL)
-		return -1;
+		goto error;
 
-	if (dev->mem && dev->mem->mapped_address) {
-		munmap((void *)(uintptr_t)dev->mem->mapped_address,
-			(size_t)dev->mem->mapped_size);
-		free(dev->mem);
-		dev->mem = NULL;
+	dev_mem = dev->mem_arr[dev->mem_idx];
+	if (dev_mem && dev_mem->mapped_address) {
+		munmap((void *)(uintptr_t)dev_mem->mapped_address,
+			(size_t)dev_mem->mapped_size);
+		free(dev_mem);
+		dev->mem_arr[dev->mem_idx] = NULL;
 	}
 
-	dev->mem = calloc(1, sizeof(struct virtio_memory) +
+	dev->mem_arr[dev->mem_idx] = calloc(1, sizeof(struct virtio_memory) +
 		sizeof(struct virtio_memory_regions) * nregions);
-	if (dev->mem == NULL) {
+	dev_mem = dev->mem_arr[dev->mem_idx];
+
+	if (dev_mem == NULL) {
 		RTE_LOG(ERR, VHOST_CONFIG,
-			"(%"PRIu64") Failed to allocate memory for dev->mem\n",
-			dev->device_fh);
-		return -1;
+			"(%"PRIu64") Failed to allocate memory for dev->mem_arr[%d]\n",
+			dev->device_fh, dev->mem_idx);
+		goto error;
 	}
 
-	pregion = &dev->mem->regions[0];
+	pregion = &dev_mem->regions[0];
 
 	for (idx = 0; idx < nregions; idx++) {
 		pregion[idx].guest_phys_address =
@@ -320,14 +324,12 @@ cuse_set_mem_table(struct vhost_device_ctx ctx,
 				pregion[idx].userspace_address;
 			/* Map VM memory file */
 			if (host_memory_map(ctx.pid, base_address,
-				&mapped_address, &mapped_size) != 0) {
-				free(dev->mem);
-				dev->mem = NULL;
-				return -1;
-			}
-			dev->mem->mapped_address = mapped_address;
-			dev->mem->base_address = base_address;
-			dev->mem->mapped_size = mapped_size;
+				&mapped_address, &mapped_size) != 0)
+				goto free;
+
+			dev_mem->mapped_address = mapped_address;
+			dev_mem->base_address = base_address;
+			dev_mem->mapped_size = mapped_size;
 		}
 	}
 
@@ -335,9 +337,7 @@ cuse_set_mem_table(struct vhost_device_ctx ctx,
 	if (base_address == 0) {
 		RTE_LOG(ERR, VHOST_CONFIG,
 			"Failed to find base address of qemu memory file.\n");
-		free(dev->mem);
-		dev->mem = NULL;
-		return -1;
+		goto free;
 	}
 
 	valid_regions = nregions;
@@ -369,9 +369,16 @@ cuse_set_mem_table(struct vhost_device_ctx ctx,
 			pregion[idx].userspace_address -
 			pregion[idx].guest_phys_address;
 	}
-	dev->mem->nregions = valid_regions;
 
+	dev_mem->nregions = valid_regions;
+	dev->mem_idx = (dev->mem_idx + 1) % (dev->num_virt_queues * VIRTIO_QNUM);
 	return 0;
+
+free:
+	free(dev_mem);
+	dev->mem_arr[dev->mem_idx] = NULL;
+error:
+	return -1;
 }
 
 /*

@@ -1466,11 +1466,11 @@ attach_rxmbuf_zcp(struct virtio_net *dev)
 		desc = &vq->desc[desc_idx];
 		if (desc->flags & VRING_DESC_F_NEXT) {
 			desc = &vq->desc[desc->next];
-			buff_addr = gpa_to_vva(dev, desc->addr);
+			buff_addr = gpa_to_vva(dev, 0, desc->addr);
 			phys_addr = gpa_to_hpa(vdev, desc->addr, desc->len,
 					&addr_type);
 		} else {
-			buff_addr = gpa_to_vva(dev,
+			buff_addr = gpa_to_vva(dev, 0,
 					desc->addr + vq->vhost_hlen);
 			phys_addr = gpa_to_hpa(vdev,
 					desc->addr + vq->vhost_hlen,
@@ -1722,7 +1722,7 @@ virtio_dev_rx_zcp(struct virtio_net *dev, struct rte_mbuf **pkts,
 			rte_pktmbuf_data_len(buff), 0);
 
 		/* Buffer address translation for virtio header. */
-		buff_hdr_addr = gpa_to_vva(dev, desc->addr);
+		buff_hdr_addr = gpa_to_vva(dev, 0, desc->addr);
 		packet_len = rte_pktmbuf_data_len(buff) + vq->vhost_hlen;
 
 		/*
@@ -1946,7 +1946,7 @@ virtio_dev_tx_zcp(struct virtio_net *dev)
 		desc = &vq->desc[desc->next];
 
 		/* Buffer address translation. */
-		buff_addr = gpa_to_vva(dev, desc->addr);
+		buff_addr = gpa_to_vva(dev, 0, desc->addr);
 		/* Need check extra VLAN_HLEN size for inserting VLAN tag */
 		phys_addr = gpa_to_hpa(vdev, desc->addr, desc->len + VLAN_HLEN,
 			&addr_type);
@@ -2604,13 +2604,14 @@ new_device (struct virtio_net *dev)
 	dev->priv = vdev;
 
 	if (zero_copy) {
-		vdev->nregions_hpa = dev->mem->nregions;
-		for (regionidx = 0; regionidx < dev->mem->nregions; regionidx++) {
+		struct virtio_memory *dev_mem = dev->mem_arr[0];
+		vdev->nregions_hpa = dev_mem->nregions;
+		for (regionidx = 0; regionidx < dev_mem->nregions; regionidx++) {
 			vdev->nregions_hpa
 				+= check_hpa_regions(
-					dev->mem->regions[regionidx].guest_phys_address
-					+ dev->mem->regions[regionidx].address_offset,
-					dev->mem->regions[regionidx].memory_size);
+					dev_mem->regions[regionidx].guest_phys_address
+					+ dev_mem->regions[regionidx].address_offset,
+					dev_mem->regions[regionidx].memory_size);
 
 		}
 
@@ -2626,7 +2627,7 @@ new_device (struct virtio_net *dev)
 
 
 		if (fill_hpa_memory_regions(
-			vdev->regions_hpa, dev->mem
+			vdev->regions_hpa, dev_mem
 			) != vdev->nregions_hpa) {
 
 			RTE_LOG(ERR, VHOST_CONFIG,

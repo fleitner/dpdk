@@ -134,7 +134,7 @@ virtio_dev_rx(struct virtio_net *dev, uint16_t queue_id,
 		buff = pkts[packet_success];
 
 		/* Convert from gpa to vva (guest physical addr -> vhost virtual addr) */
-		buff_addr = gpa_to_vva(dev, desc->addr);
+		buff_addr = gpa_to_vva(dev, queue_id / VIRTIO_QNUM, desc->addr);
 		/* Prefetch buffer address. */
 		rte_prefetch0((void *)(uintptr_t)buff_addr);
 
@@ -150,7 +150,7 @@ virtio_dev_rx(struct virtio_net *dev, uint16_t queue_id,
 			desc->len = vq->vhost_hlen;
 			desc = &vq->desc[desc->next];
 			/* Buffer address translation. */
-			buff_addr = gpa_to_vva(dev, desc->addr);
+			buff_addr = gpa_to_vva(dev, queue_id / VIRTIO_QNUM, desc->addr);
 			desc->len = rte_pktmbuf_data_len(buff);
 		} else {
 			buff_addr += vq->vhost_hlen;
@@ -233,9 +233,9 @@ copy_from_mbuf_to_vring(struct virtio_net *dev, uint16_t queue_id,
 	 * Convert from gpa to vva
 	 * (guest physical addr -> vhost virtual addr)
 	 */
-	vb_addr =
-		gpa_to_vva(dev, vq->buf_vec[vec_idx].buf_addr);
 	vq = dev->virtqueue[queue_id];
+	vb_addr = gpa_to_vva(dev, queue_id / VIRTIO_QNUM,
+			vq->buf_vec[vec_idx].buf_addr);
 	vb_hdr_addr = vb_addr;
 
 	/* Prefetch buffer address. */
@@ -277,8 +277,8 @@ copy_from_mbuf_to_vring(struct virtio_net *dev, uint16_t queue_id,
 		}
 
 		vec_idx++;
-		vb_addr =
-			gpa_to_vva(dev, vq->buf_vec[vec_idx].buf_addr);
+		vb_addr = gpa_to_vva(dev, queue_id / VIRTIO_QNUM,
+			vq->buf_vec[vec_idx].buf_addr);
 
 		/* Prefetch buffer address. */
 		rte_prefetch0((void *)(uintptr_t)vb_addr);
@@ -323,7 +323,7 @@ copy_from_mbuf_to_vring(struct virtio_net *dev, uint16_t queue_id,
 			}
 
 			vec_idx++;
-			vb_addr = gpa_to_vva(dev,
+			vb_addr = gpa_to_vva(dev, queue_id / VIRTIO_QNUM,
 				vq->buf_vec[vec_idx].buf_addr);
 			vb_offset = 0;
 			vb_avail = vq->buf_vec[vec_idx].buf_len;
@@ -367,7 +367,7 @@ copy_from_mbuf_to_vring(struct virtio_net *dev, uint16_t queue_id,
 
 					/* Get next buffer from buf_vec. */
 					vec_idx++;
-					vb_addr = gpa_to_vva(dev,
+					vb_addr = gpa_to_vva(dev, queue_id / VIRTIO_QNUM,
 						vq->buf_vec[vec_idx].buf_addr);
 					vb_avail =
 						vq->buf_vec[vec_idx].buf_len;
@@ -615,7 +615,7 @@ rte_vhost_dequeue_burst(struct virtio_net *dev, uint16_t queue_id,
 		desc = &vq->desc[desc->next];
 
 		/* Buffer address translation. */
-		vb_addr = gpa_to_vva(dev, desc->addr);
+		vb_addr = gpa_to_vva(dev, queue_id / VIRTIO_QNUM, desc->addr);
 		/* Prefetch buffer address. */
 		rte_prefetch0((void *)(uintptr_t)vb_addr);
 
@@ -721,7 +721,8 @@ rte_vhost_dequeue_burst(struct virtio_net *dev, uint16_t queue_id,
 					desc = &vq->desc[desc->next];
 
 					/* Buffer address translation. */
-					vb_addr = gpa_to_vva(dev, desc->addr);
+					vb_addr = gpa_to_vva(dev,
+						queue_id / VIRTIO_QNUM, desc->addr);
 					/* Prefetch buffer address. */
 					rte_prefetch0((void *)(uintptr_t)vb_addr);
 					vb_offset = 0;

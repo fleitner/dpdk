@@ -95,14 +95,15 @@ struct vhost_virtqueue {
  * Device structure contains all configuration information relating to the device.
  */
 struct virtio_net {
-	struct virtio_memory	*mem;		/**< QEMU memory and memory region information. */
 	struct vhost_virtqueue	**virtqueue;    /**< Contains all virtqueue information. */
+	struct virtio_memory    **mem_arr;      /**< Array for QEMU memory and memory region information. */
 	uint64_t		features;	/**< Negotiated feature set. */
 	uint64_t		device_fh;	/**< device identifier. */
 	uint32_t		flags;		/**< Device flags. Only used to check if device is running on data core. */
 #define IF_NAME_SZ (PATH_MAX > IFNAMSIZ ? PATH_MAX : IFNAMSIZ)
 	char			ifname[IF_NAME_SZ];	/**< Name of the tap device or socket path. */
 	uint32_t		num_virt_queues;
+	uint32_t		mem_idx;	/** Used in set memory layout, unique for each queue within virtio device. */
 	void			*priv;		/**< private context */
 } __rte_cache_aligned;
 
@@ -153,14 +154,15 @@ rte_vring_available_entries(struct virtio_net *dev, uint16_t queue_id)
  * This is used to convert guest virtio buffer addresses.
  */
 static inline uint64_t __attribute__((always_inline))
-gpa_to_vva(struct virtio_net *dev, uint64_t guest_pa)
+gpa_to_vva(struct virtio_net *dev, uint32_t q_idx, uint64_t guest_pa)
 {
 	struct virtio_memory_regions *region;
+	struct virtio_memory *dev_mem = dev->mem_arr[q_idx];
 	uint32_t regionidx;
 	uint64_t vhost_va = 0;
 
-	for (regionidx = 0; regionidx < dev->mem->nregions; regionidx++) {
-		region = &dev->mem->regions[regionidx];
+	for (regionidx = 0; regionidx < dev_mem->nregions; regionidx++) {
+		region = &dev_mem->regions[regionidx];
 		if ((guest_pa >= region->guest_phys_address) &&
 			(guest_pa <= region->guest_phys_address_end)) {
 			vhost_va = region->address_offset + guest_pa;

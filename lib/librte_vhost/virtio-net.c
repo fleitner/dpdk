@@ -76,15 +76,16 @@ static uint64_t VHOST_FEATURES = VHOST_SUPPORTED_FEATURES;
  * used to convert the ring addresses to our address space.
  */
 static uint64_t
-qva_to_vva(struct virtio_net *dev, uint64_t qemu_va)
+qva_to_vva(struct virtio_net *dev, uint32_t q_idx, uint64_t qemu_va)
 {
 	struct virtio_memory_regions *region;
 	uint64_t vhost_va = 0;
 	uint32_t regionidx = 0;
+	struct virtio_memory *dev_mem = dev->mem_arr[q_idx];
 
 	/* Find the region where the address lives. */
-	for (regionidx = 0; regionidx < dev->mem->nregions; regionidx++) {
-		region = &dev->mem->regions[regionidx];
+	for (regionidx = 0; regionidx < dev_mem->nregions; regionidx++) {
+		region = &dev_mem->regions[regionidx];
 		if ((qemu_va >= region->userspace_address) &&
 			(qemu_va <= region->userspace_address +
 			region->memory_size)) {
@@ -181,10 +182,13 @@ cleanup_device(struct virtio_net *dev)
 	uint32_t qp_idx;
 
 	/* Unmap QEMU memory file if mapped. */
-	if (dev->mem) {
-		munmap((void *)(uintptr_t)dev->mem->mapped_address,
-			(size_t)dev->mem->mapped_size);
-		free(dev->mem);
+	for (qp_idx = 0; qp_idx < dev->num_virt_queues; qp_idx++) {
+		struct virtio_memory *dev_mem = dev->mem_arr[qp_idx];
+		if (dev_mem) {
+			munmap((void *)(uintptr_t)dev_mem->mapped_address,
+				(size_t)dev_mem->mapped_size);
+			free(dev_mem);
+		}
 	}
 
 	/* Close any event notifiers opened by device. */
@@ -213,6 +217,8 @@ free_device(struct virtio_net_config_ll *ll_dev)
 	/*
 	 * Free any malloc'd memory.
 	 */
+	free(ll_dev->dev.mem_arr);
+
 	/* Free every queue pair. */
 	for (qp_idx = 0; qp_idx < ll_dev->dev.num_virt_queues; qp_idx++) {
 		uint32_t virt_rx_q_idx = qp_idx * VIRTIO_QNUM + VIRTIO_RXQ;
@@ -284,7 +290,7 @@ init_device(struct virtio_net *dev)
 	 * Virtqueues have already been malloced so
 	 * we don't want to set them to NULL.
 	 */
-	vq_offset = offsetof(struct virtio_net, mem);
+	vq_offset = offsetof(struct virtio_net, features);
 
 	/* Set everything to 0. */
 	memset((void *)(uintptr_t)((uint64_t)(uintptr_t)dev + vq_offset), 0,
@@ -348,6 +354,16 @@ new_device(struct vhost_device_ctx ctx)
 	if (alloc_vring_queue_pair(&new_ll_dev->dev, 0) == -1) {
 		free(new_ll_dev->dev.virtqueue);
 		free(new_ll_dev);
+		return -1;
+	}
+
+	new_ll_dev->dev.mem_arr =
+		malloc(VIRTIO_NET_CTRL_MQ_VQ_PAIRS_MAX * sizeof(struct virtio_memory *));
+	if (new_ll_dev->dev.mem_arr == NULL) {
+		RTE_LOG(ERR, VHOST_CONFIG,
+			"(%"PRIu64") Failed to allocate memory for dev.mem_arr.\n",
+			ctx.fh);
+		free_device(new_ll_dev);
 		return -1;
 	}
 
@@ -547,7 +563,7 @@ set_vring_addr(struct vhost_device_ctx ctx, struct vhost_vring_addr *addr)
 
 	/* The addresses are converted from QEMU virtual to Vhost virtual. */
 	vq->desc = (struct vring_desc *)(uintptr_t)qva_to_vva(dev,
-			addr->desc_user_addr);
+			addr->index / VIRTIO_QNUM, addr->desc_user_addr);
 	if (vq->desc == 0) {
 		RTE_LOG(ERR, VHOST_CONFIG,
 			"(%"PRIu64") Failed to find desc ring address.\n",
@@ -556,7 +572,7 @@ set_vring_addr(struct vhost_device_ctx ctx, struct vhost_vring_addr *addr)
 	}
 
 	vq->avail = (struct vring_avail *)(uintptr_t)qva_to_vva(dev,
-			addr->avail_user_addr);
+			addr->index / VIRTIO_QNUM, addr->avail_user_addr);
 	if (vq->avail == 0) {
 		RTE_LOG(ERR, VHOST_CONFIG,
 			"(%"PRIu64") Failed to find avail ring address.\n",
@@ -565,7 +581,7 @@ set_vring_addr(struct vhost_device_ctx ctx, struct vhost_vring_addr *addr)
 	}
 
 	vq->used = (struct vring_used *)(uintptr_t)qva_to_vva(dev,
-			addr->used_user_addr);
+			addr->index / VIRTIO_QNUM, addr->used_user_addr);
 	if (vq->used == 0) {
 		RTE_LOG(ERR, VHOST_CONFIG,
 			"(%"PRIu64") Failed to find used ring address.\n",

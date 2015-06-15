@@ -70,17 +70,17 @@ get_blk_size(int fd)
 }
 
 static void
-free_mem_region(struct virtio_net *dev)
+free_mem_region(struct virtio_memory *dev_mem)
 {
 	struct orig_region_map *region;
 	unsigned int idx;
 	uint64_t alignment;
 
-	if (!dev || !dev->mem)
+	if (!dev_mem)
 		return;
 
-	region = orig_region(dev->mem, dev->mem->nregions);
-	for (idx = 0; idx < dev->mem->nregions; idx++) {
+	region = orig_region(dev_mem, dev_mem->nregions);
+	for (idx = 0; idx < dev_mem->nregions; idx++) {
 		if (region[idx].mapped_address) {
 			alignment = region[idx].blksz;
 			munmap((void *)(uintptr_t)
@@ -103,37 +103,37 @@ user_set_mem_table(struct vhost_device_ctx ctx, struct VhostUserMsg *pmsg)
 	unsigned int idx = 0;
 	struct orig_region_map *pregion_orig;
 	uint64_t alignment;
+	struct virtio_memory *dev_mem = NULL;
 
 	/* unmap old memory regions one by one*/
 	dev = get_device(ctx);
 	if (dev == NULL)
 		return -1;
 
-	/* Remove from the data plane. */
-	if (dev->flags & VIRTIO_DEV_RUNNING)
-		notify_ops->destroy_device(dev);
-
-	if (dev->mem) {
-		free_mem_region(dev);
-		free(dev->mem);
-		dev->mem = NULL;
+	dev_mem = dev->mem_arr[dev->mem_idx];
+	if (dev_mem) {
+		free_mem_region(dev_mem);
+		free(dev_mem);
+		dev->mem_arr[dev->mem_idx] = NULL;
 	}
 
-	dev->mem = calloc(1,
+	dev->mem_arr[dev->mem_idx] = calloc(1,
 		sizeof(struct virtio_memory) +
 		sizeof(struct virtio_memory_regions) * memory.nregions +
 		sizeof(struct orig_region_map) * memory.nregions);
-	if (dev->mem == NULL) {
+
+	dev_mem = dev->mem_arr[dev->mem_idx];
+	if (dev_mem == NULL) {
 		RTE_LOG(ERR, VHOST_CONFIG,
-			"(%"PRIu64") Failed to allocate memory for dev->mem\n",
-			dev->device_fh);
+			"(%"PRIu64") Failed to allocate memory for dev->mem_arr[%d]\n",
+			dev->device_fh, dev->mem_idx);
 		return -1;
 	}
-	dev->mem->nregions = memory.nregions;
+	dev_mem->nregions = memory.nregions;
 
-	pregion_orig = orig_region(dev->mem, memory.nregions);
+	pregion_orig = orig_region(dev_mem, memory.nregions);
 	for (idx = 0; idx < memory.nregions; idx++) {
-		pregion = &dev->mem->regions[idx];
+		pregion = &dev_mem->regions[idx];
 		pregion->guest_phys_address =
 			memory.regions[idx].guest_phys_addr;
 		pregion->guest_phys_address_end =
@@ -175,9 +175,9 @@ user_set_mem_table(struct vhost_device_ctx ctx, struct VhostUserMsg *pmsg)
 			pregion->guest_phys_address;
 
 		if (memory.regions[idx].guest_phys_addr == 0) {
-			dev->mem->base_address =
+			dev_mem->base_address =
 				memory.regions[idx].userspace_addr;
-			dev->mem->mapped_address =
+			dev_mem->mapped_address =
 				pregion->address_offset;
 		}
 
@@ -189,6 +189,7 @@ user_set_mem_table(struct vhost_device_ctx ctx, struct VhostUserMsg *pmsg)
 			 pregion->memory_size);
 	}
 
+	dev->mem_idx = (dev->mem_idx + 1) % (dev->num_virt_queues * VIRTIO_QNUM);
 	return 0;
 
 err_mmap:
@@ -200,8 +201,8 @@ err_mmap:
 					alignment));
 		close(pregion_orig[idx].fd);
 	}
-	free(dev->mem);
-	dev->mem = NULL;
+	free(dev_mem);
+	dev->mem_arr[dev->mem_idx] = NULL;
 	return -1;
 }
 
@@ -346,13 +347,15 @@ void
 user_destroy_device(struct vhost_device_ctx ctx)
 {
 	struct virtio_net *dev = get_device(ctx);
+	uint32_t i;
 
 	if (dev && (dev->flags & VIRTIO_DEV_RUNNING))
 		notify_ops->destroy_device(dev);
 
-	if (dev && dev->mem) {
-		free_mem_region(dev);
-		free(dev->mem);
-		dev->mem = NULL;
-	}
+	for (i = 0; i < dev->num_virt_queues; i++)
+		if (dev && dev->mem_arr[i]) {
+			free_mem_region(dev->mem_arr[i]);
+			free(dev->mem_arr[i]);
+			dev->mem_arr[i] = NULL;
+		}
 }
