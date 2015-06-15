@@ -314,7 +314,7 @@ struct ipv4_hdr {
 #define VLAN_ETH_HLEN   18
 
 /* Per-device statistics struct */
-struct device_statistics {
+struct qp_statistics {
 	uint64_t tx_total;
 	rte_atomic64_t rx_total_atomic;
 	uint64_t rx_total;
@@ -322,6 +322,10 @@ struct device_statistics {
 	rte_atomic64_t rx_atomic;
 	uint64_t rx;
 } __rte_cache_aligned;
+
+struct device_statistics {
+	struct qp_statistics *qp_stats;
+};
 struct device_statistics dev_statistics[MAX_DEVICES];
 
 /*
@@ -738,6 +742,17 @@ us_vhost_parse_args(int argc, char **argv)
 					return -1;
 				} else {
 					enable_stats = ret;
+					if (enable_stats)
+						for (i = 0; i < MAX_DEVICES; i++) {
+							dev_statistics[i].qp_stats =
+								malloc(VIRTIO_NET_CTRL_MQ_VQ_PAIRS_MAX * sizeof(struct qp_statistics));
+							if (dev_statistics[i].qp_stats == NULL) {
+								RTE_LOG(ERR, VHOST_CONFIG, "Failed to allocate memory for qp stats.\n");
+								return -1;
+							}
+							memset(dev_statistics[i].qp_stats, 0,
+								VIRTIO_NET_CTRL_MQ_VQ_PAIRS_MAX * sizeof(struct qp_statistics));
+						}
 				}
 			}
 
@@ -1093,13 +1108,13 @@ virtio_tx_local(struct vhost_dev *vdev, struct rte_mbuf *m, uint32_t q_idx)
 					&m, 1);
 				if (enable_stats) {
 					rte_atomic64_add(
-					&dev_statistics[tdev->device_fh].rx_total_atomic,
+					&dev_statistics[tdev->device_fh].qp_stats[q_idx].rx_total_atomic,
 					1);
 					rte_atomic64_add(
-					&dev_statistics[tdev->device_fh].rx_atomic,
+					&dev_statistics[tdev->device_fh].qp_stats[q_idx].rx_atomic,
 					ret);
-					dev_statistics[tdev->device_fh].tx_total++;
-					dev_statistics[tdev->device_fh].tx += ret;
+					dev_statistics[dev->device_fh].qp_stats[q_idx].tx_total++;
+					dev_statistics[dev->device_fh].qp_stats[q_idx].tx += ret;
 				}
 			}
 
@@ -1233,8 +1248,8 @@ virtio_tx_route(struct vhost_dev *vdev, struct rte_mbuf *m,
 	tx_q->m_table[len] = m;
 	len++;
 	if (enable_stats) {
-		dev_statistics[dev->device_fh].tx_total++;
-		dev_statistics[dev->device_fh].tx++;
+		dev_statistics[dev->device_fh].qp_stats[q_idx].tx_total++;
+		dev_statistics[dev->device_fh].qp_stats[q_idx].tx++;
 	}
 
 	if (unlikely(len == MAX_PKT_BURST)) {
@@ -1365,10 +1380,10 @@ switch_worker(__attribute__((unused)) void *arg)
 											pkts_burst, rx_count);
 						if (enable_stats) {
 							rte_atomic64_add(
-							&dev_statistics[dev_ll->vdev->dev->device_fh].rx_total_atomic,
+							&dev_statistics[dev_ll->vdev->dev->device_fh].qp_stats[i].rx_total_atomic,
 							rx_count);
 							rte_atomic64_add(
-							&dev_statistics[dev_ll->vdev->dev->device_fh].rx_atomic, ret_count);
+							&dev_statistics[dev_ll->vdev->dev->device_fh].qp_stats[i].rx_atomic, ret_count);
 						}
 						while (likely(rx_count)) {
 							rx_count--;
@@ -1918,8 +1933,8 @@ virtio_tx_route_zcp(struct virtio_net *dev, struct rte_mbuf *m,
 		(mbuf->next == NULL) ? "null" : "non-null");
 
 	if (enable_stats) {
-		dev_statistics[dev->device_fh].tx_total++;
-		dev_statistics[dev->device_fh].tx++;
+		dev_statistics[dev->device_fh].qp_stats[0].tx_total++;
+		dev_statistics[dev->device_fh].qp_stats[0].tx++;
 	}
 
 	if (unlikely(len == MAX_PKT_BURST)) {
@@ -2202,9 +2217,9 @@ switch_worker_zcp(__attribute__((unused)) void *arg)
 					ret_count = virtio_dev_rx_zcp(dev,
 							pkts_burst, rx_count);
 					if (enable_stats) {
-						dev_statistics[dev->device_fh].rx_total
+						dev_statistics[dev->device_fh].qp_stats[0].rx_total
 							+= rx_count;
-						dev_statistics[dev->device_fh].rx
+						dev_statistics[dev->device_fh].qp_stats[0].rx
 							+= ret_count;
 					}
 					while (likely(rx_count)) {
@@ -2824,7 +2839,9 @@ new_device (struct virtio_net *dev)
 	add_data_ll_entry(&lcore_info[vdev->coreid].lcore_ll->ll_root_used, ll_dev);
 
 	/* Initialize device stats */
-	memset(&dev_statistics[dev->device_fh], 0, sizeof(struct device_statistics));
+	if (enable_stats)
+		memset(dev_statistics[dev->device_fh].qp_stats, 0,
+			VIRTIO_NET_CTRL_MQ_VQ_PAIRS_MAX * sizeof(struct qp_statistics));
 
 	/* Disable notifications. */
 	rte_vhost_enable_guest_notification(dev, VIRTIO_RXQ, 0);
@@ -2857,7 +2874,7 @@ print_stats(void)
 	struct virtio_net_data_ll *dev_ll;
 	uint64_t tx_dropped, rx_dropped;
 	uint64_t tx, tx_total, rx, rx_total;
-	uint32_t device_fh;
+	uint32_t device_fh, i;
 	const char clr[] = { 27, '[', '2', 'J', '\0' };
 	const char top_left[] = { 27, '[', '1', ';', '1', 'H','\0' };
 
@@ -2872,35 +2889,53 @@ print_stats(void)
 		dev_ll = ll_root_used;
 		while (dev_ll != NULL) {
 			device_fh = (uint32_t)dev_ll->vdev->dev->device_fh;
-			tx_total = dev_statistics[device_fh].tx_total;
-			tx = dev_statistics[device_fh].tx;
-			tx_dropped = tx_total - tx;
-			if (zero_copy == 0) {
-				rx_total = rte_atomic64_read(
-					&dev_statistics[device_fh].rx_total_atomic);
-				rx = rte_atomic64_read(
-					&dev_statistics[device_fh].rx_atomic);
-			} else {
-				rx_total = dev_statistics[device_fh].rx_total;
-				rx = dev_statistics[device_fh].rx;
-			}
-			rx_dropped = rx_total - rx;
+			for (i = 0; i < rxq; i++) {
+				tx_total = dev_statistics[device_fh].qp_stats[i].tx_total;
+				tx = dev_statistics[device_fh].qp_stats[i].tx;
+				tx_dropped = tx_total - tx;
+				if (zero_copy == 0) {
+					rx_total = rte_atomic64_read(
+						&dev_statistics[device_fh].qp_stats[i].rx_total_atomic);
+					rx = rte_atomic64_read(
+						&dev_statistics[device_fh].qp_stats[i].rx_atomic);
+				} else {
+					rx_total = dev_statistics[device_fh].qp_stats[0].rx_total;
+					rx = dev_statistics[device_fh].qp_stats[0].rx;
+				}
+				rx_dropped = rx_total - rx;
 
-			printf("\nStatistics for device %"PRIu32" ------------------------------"
-					"\nTX total: 		%"PRIu64""
-					"\nTX dropped: 		%"PRIu64""
-					"\nTX successful: 		%"PRIu64""
-					"\nRX total: 		%"PRIu64""
-					"\nRX dropped: 		%"PRIu64""
-					"\nRX successful: 		%"PRIu64"",
-					device_fh,
-					tx_total,
-					tx_dropped,
-					tx,
-					rx_total,
-					rx_dropped,
-					rx);
-
+				if (rxq > 1)
+					printf("\nStatistics for device %"PRIu32" queue id: %d------------------"
+						"\nTX total:		%"PRIu64""
+						"\nTX dropped:		%"PRIu64""
+						"\nTX success:		%"PRIu64""
+						"\nRX total:		%"PRIu64""
+						"\nRX dropped:		%"PRIu64""
+						"\nRX success:		%"PRIu64"",
+						device_fh,
+						i,
+						tx_total,
+						tx_dropped,
+						tx,
+						rx_total,
+						rx_dropped,
+						rx);
+				else
+					printf("\nStatistics for device %"PRIu32" ------------------------------"
+						"\nTX total:		%"PRIu64""
+						"\nTX dropped:		%"PRIu64""
+						"\nTX success:		%"PRIu64""
+						"\nRX total:		%"PRIu64""
+						"\nRX dropped:		%"PRIu64""
+						"\nRX success:		%"PRIu64"",
+						device_fh,
+						tx_total,
+						tx_dropped,
+						tx,
+						rx_total,
+						rx_dropped,
+						rx);
+				}
 			dev_ll = dev_ll->next;
 		}
 		printf("\n======================================================\n");
@@ -3069,9 +3104,6 @@ main(int argc, char *argv[])
 	/* Initialise all linked lists. */
 	if (init_data_ll() == -1)
 		rte_exit(EXIT_FAILURE, "Failed to initialize linked list\n");
-
-	/* Initialize device stats */
-	memset(&dev_statistics, 0, sizeof(dev_statistics));
 
 	/* Enable stats if the user option is set. */
 	if (enable_stats)
