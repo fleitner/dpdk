@@ -209,30 +209,46 @@ static int
 virtio_is_ready(struct virtio_net *dev)
 {
 	struct vhost_virtqueue *rvq, *tvq;
+	uint32_t q_idx;
 
 	/* mq support in future.*/
-	rvq = dev->virtqueue[VIRTIO_RXQ];
-	tvq = dev->virtqueue[VIRTIO_TXQ];
-	if (rvq && tvq && rvq->desc && tvq->desc &&
-		(rvq->kickfd != (eventfd_t)-1) &&
-		(rvq->callfd != (eventfd_t)-1) &&
-		(tvq->kickfd != (eventfd_t)-1) &&
-		(tvq->callfd != (eventfd_t)-1)) {
-		RTE_LOG(INFO, VHOST_CONFIG,
-			"virtio is now ready for processing.\n");
-		return 1;
+	for (q_idx = 0; q_idx < dev->num_virt_queues; q_idx++) {
+		uint32_t virt_rx_q_idx = q_idx * VIRTIO_QNUM + VIRTIO_RXQ;
+		uint32_t virt_tx_q_idx = q_idx * VIRTIO_QNUM + VIRTIO_TXQ;
+
+		rvq = dev->virtqueue[virt_rx_q_idx];
+		tvq = dev->virtqueue[virt_tx_q_idx];
+		if ((rvq == NULL) || (tvq == NULL) ||
+			(rvq->desc == NULL) || (tvq->desc == NULL) ||
+			(rvq->kickfd == (eventfd_t)-1) ||
+			(rvq->callfd == (eventfd_t)-1) ||
+			(tvq->kickfd == (eventfd_t)-1) ||
+			(tvq->callfd == (eventfd_t)-1)) {
+			RTE_LOG(INFO, VHOST_CONFIG,
+				"virtio isn't ready for processing.\n");
+			return 0;
+		}
 	}
 	RTE_LOG(INFO, VHOST_CONFIG,
-		"virtio isn't ready for processing.\n");
-	return 0;
+		"virtio is now ready for processing.\n");
+	return 1;
 }
 
 void
 user_set_vring_call(struct vhost_device_ctx ctx, struct VhostUserMsg *pmsg)
 {
 	struct vhost_vring_file file;
+	struct virtio_net *dev = get_device(ctx);
+	uint32_t cur_qp_idx;
 
 	file.index = pmsg->payload.u64 & VHOST_USER_VRING_IDX_MASK;
+	cur_qp_idx = (file.index & (~0x1)) >> 1;
+
+	if (dev->num_virt_queues < cur_qp_idx + 1) {
+		if (alloc_vring_queue_pair(dev, cur_qp_idx) == 0)
+			dev->num_virt_queues = cur_qp_idx + 1;
+	}
+
 	if (pmsg->payload.u64 & VHOST_USER_VRING_NOFD_MASK)
 		file.fd = -1;
 	else
@@ -290,13 +306,37 @@ user_get_vring_base(struct vhost_device_ctx ctx,
 	 * sent and only sent in vhost_vring_stop.
 	 * TODO: cleanup the vring, it isn't usable since here.
 	 */
-	if (((int)dev->virtqueue[VIRTIO_RXQ]->kickfd) >= 0) {
-		close(dev->virtqueue[VIRTIO_RXQ]->kickfd);
-		dev->virtqueue[VIRTIO_RXQ]->kickfd = (eventfd_t)-1;
+	if (((int)dev->virtqueue[state->index]->kickfd) >= 0) {
+		close(dev->virtqueue[state->index]->kickfd);
+		dev->virtqueue[state->index]->kickfd = (eventfd_t)-1;
 	}
-	if (((int)dev->virtqueue[VIRTIO_TXQ]->kickfd) >= 0) {
-		close(dev->virtqueue[VIRTIO_TXQ]->kickfd);
-		dev->virtqueue[VIRTIO_TXQ]->kickfd = (eventfd_t)-1;
+
+	return 0;
+}
+
+/*
+ * when virtio is stopped, qemu will send us the RESET_OWNER message.
+ */
+int
+user_reset_owner(struct vhost_device_ctx ctx,
+	struct vhost_vring_state *state)
+{
+	struct virtio_net *dev = get_device(ctx);
+
+	/* We have to stop the queue (virtio) if it is running. */
+	if (dev->flags & VIRTIO_DEV_RUNNING)
+		notify_ops->destroy_device(dev);
+
+	RTE_LOG(INFO, VHOST_CONFIG,
+		"reset owner --- state idx:%d state num:%d\n", state->index, state->num);
+	/*
+	 * Based on current qemu vhost-user implementation, this message is
+	 * sent and only sent in vhost_net_stop_one.
+	 * TODO: cleanup the vring, it isn't usable since here.
+	 */
+	if (((int)dev->virtqueue[state->index]->kickfd) >= 0) {
+		close(dev->virtqueue[state->index]->kickfd);
+		dev->virtqueue[state->index]->kickfd = (eventfd_t)-1;
 	}
 
 	return 0;

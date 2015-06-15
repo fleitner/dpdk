@@ -46,4 +46,6 @@ void user_set_vring_kick(struct vhost_device_ctx, struct VhostUserMsg *);
 int user_get_vring_base(struct vhost_device_ctx, struct vhost_vring_state *);
 
 void user_destroy_device(struct vhost_device_ctx);
+
+int user_reset_owner(struct vhost_device_ctx ctx, struct vhost_vring_state *state);
 #endif

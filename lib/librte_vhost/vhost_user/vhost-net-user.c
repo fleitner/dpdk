@@ -378,7 +378,9 @@ vserver_message_handler(int connfd, void *dat, int *remove)
 		ops->set_owner(ctx);
 		break;
 	case VHOST_USER_RESET_OWNER:
-		ops->reset_owner(ctx);
+		RTE_LOG(INFO, VHOST_CONFIG,
+			"(%"PRIu64") VHOST_NET_RESET_OWNER\n", ctx.fh);
+		user_reset_owner(ctx, &msg.payload.state);
 		break;
 
 	case VHOST_USER_SET_MEM_TABLE:

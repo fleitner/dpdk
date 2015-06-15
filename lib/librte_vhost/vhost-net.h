@@ -115,4 +115,5 @@ struct vhost_net_device_ops {
 
 
 struct vhost_net_device_ops const *get_virtio_net_callbacks(void);
+int alloc_vring_queue_pair(struct virtio_net *dev, uint16_t qp_idx);
 #endif /* _VHOST_NET_CDEV_H_ */

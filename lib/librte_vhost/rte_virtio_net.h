@@ -59,7 +59,6 @@ struct rte_mbuf;
 /* Backend value set by guest. */
 #define VIRTIO_DEV_STOPPED -1
 
-
 /* Enum for virtqueue management. */
 enum {VIRTIO_RXQ, VIRTIO_TXQ, VIRTIO_QNUM};
 
@@ -96,13 +95,14 @@ struct vhost_virtqueue {
  * Device structure contains all configuration information relating to the device.
  */
 struct virtio_net {
-	struct vhost_virtqueue	*virtqueue[VIRTIO_QNUM];	/**< Contains all virtqueue information. */
 	struct virtio_memory	*mem;		/**< QEMU memory and memory region information. */
+	struct vhost_virtqueue	**virtqueue;    /**< Contains all virtqueue information. */
 	uint64_t		features;	/**< Negotiated feature set. */
 	uint64_t		device_fh;	/**< device identifier. */
 	uint32_t		flags;		/**< Device flags. Only used to check if device is running on data core. */
 #define IF_NAME_SZ (PATH_MAX > IFNAMSIZ ? PATH_MAX : IFNAMSIZ)
 	char			ifname[IF_NAME_SZ];	/**< Name of the tap device or socket path. */
+	uint32_t		num_virt_queues;
 	void			*priv;		/**< private context */
 } __rte_cache_aligned;
 
@@ -220,4 +220,10 @@ uint16_t rte_vhost_enqueue_burst(struct virtio_net *dev, uint16_t queue_id,
 uint16_t rte_vhost_dequeue_burst(struct virtio_net *dev, uint16_t queue_id,
 	struct rte_mempool *mbuf_pool, struct rte_mbuf **pkts, uint16_t count);
 
+/**
+ * This function get the queue pair number of one vhost device.
+ * @return
+ *  num of queue pair of specified virtio device.
+ */
+uint16_t rte_vhost_qp_num_get(struct virtio_net *dev);
 #endif /* _VIRTIO_NET_H_ */
