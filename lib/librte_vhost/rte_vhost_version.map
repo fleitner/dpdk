@@ -10,6 +10,7 @@ DPDK_2.0 {
 	rte_vhost_feature_disable;
 	rte_vhost_feature_enable;
 	rte_vhost_feature_get;
+	rte_vring_available_entries;
 
 	local: *;
 };

@@ -260,7 +260,7 @@ rm_config_ll_entry(struct virtio_net_config_ll *ll_dev,
 /*
  *  Initialise all variables in vring queue pair.
  */
-static void
+void
 init_vring_queue_pair(struct virtio_net *dev, uint16_t qp_idx)
 {
 	uint32_t virt_rx_q_idx = qp_idx * VIRTIO_QNUM + VIRTIO_RXQ;

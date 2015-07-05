@@ -246,8 +246,10 @@ user_set_vring_call(struct vhost_device_ctx ctx, struct VhostUserMsg *pmsg)
 	cur_qp_idx = (file.index & (~0x1)) >> 1;
 
 	if (dev->num_virt_queues < cur_qp_idx + 1) {
-		if (alloc_vring_queue_pair(dev, cur_qp_idx) == 0)
+		if (alloc_vring_queue_pair(dev, cur_qp_idx) == 0) {
 			dev->num_virt_queues = cur_qp_idx + 1;
+			init_vring_queue_pair(dev, cur_qp_idx);
+		}
 	}
 
 	if (pmsg->payload.u64 & VHOST_USER_VRING_NOFD_MASK)
