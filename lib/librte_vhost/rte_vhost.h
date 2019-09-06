@@ -523,6 +523,8 @@ uint16_t rte_vhost_enqueue_burst(int vid, uint16_t queue_id,
  *  virtio queue index in mq case
  * @param mbuf_pool
  *  mbuf_pool where host mbuf is allocated.
+ * @param mbuf_pool64k
+ *  mbuf_pool where host large mbuf is allocated.
  * @param pkts
  *  array to contain packets to be dequeued
  * @param count
@@ -531,7 +533,8 @@ uint16_t rte_vhost_enqueue_burst(int vid, uint16_t queue_id,
  *  num of packets dequeued
  */
 uint16_t rte_vhost_dequeue_burst(int vid, uint16_t queue_id,
-	struct rte_mempool *mbuf_pool, struct rte_mbuf **pkts, uint16_t count);
+	struct rte_mempool *mbuf_pool, struct rte_mempool *mbuf_pool64k,
+	struct rte_mbuf **pkts, uint16_t count);
 
 /**
  * Get guest mem table: a list of memory regions.

@@ -702,7 +702,7 @@ switch_worker(__rte_unused void *arg)
 			if (likely(!vdev->remove)) {
 				/* Handle guest TX*/
 				tx_count = rte_vhost_dequeue_burst(vdev->vid,
-						VIRTIO_TXQ, mbuf_pool,
+						VIRTIO_TXQ, mbuf_pool, NULL,
 						pkts_burst, MAX_PKT_BURST);
 				/* If this is the first received packet we need to learn the MAC */
 				if (unlikely(vdev->ready == DEVICE_MAC_LEARNING) && tx_count) {

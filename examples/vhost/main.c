@@ -1091,7 +1091,7 @@ drain_virtio_tx(struct vhost_dev *vdev)
 					pkts, MAX_PKT_BURST);
 	} else {
 		count = rte_vhost_dequeue_burst(vdev->vid, VIRTIO_TXQ,
-					mbuf_pool, pkts, MAX_PKT_BURST);
+					mbuf_pool, NULL, pkts, MAX_PKT_BURST);
 	}
 
 	/* setup VMDq for the first packet */

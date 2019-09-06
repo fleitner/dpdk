@@ -389,8 +389,8 @@ eth_vhost_rx(void *q, struct rte_mbuf **bufs, uint16_t nb_bufs)
 						 VHOST_MAX_PKT_BURST);
 
 		nb_pkts = rte_vhost_dequeue_burst(r->vid, r->virtqueue_id,
-						  r->mb_pool, &bufs[nb_rx],
-						  num);
+						  r->mb_pool, NULL,
+						  &bufs[nb_rx], num);
 
 		nb_rx += nb_pkts;
 		nb_receive -= nb_pkts;

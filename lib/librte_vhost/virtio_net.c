@@ -1327,7 +1327,8 @@ again:
 
 static __rte_always_inline uint16_t
 virtio_dev_tx_split(struct virtio_net *dev, struct vhost_virtqueue *vq,
-	struct rte_mempool *mbuf_pool, struct rte_mbuf **pkts, uint16_t count)
+	struct rte_mempool *mbuf_pool, struct rte_mempool *mbuf_pool64k,
+	struct rte_mbuf **pkts, uint16_t count)
 {
 	uint16_t i;
 	uint16_t free_entries;
@@ -1379,14 +1380,15 @@ virtio_dev_tx_split(struct virtio_net *dev, struct vhost_virtqueue *vq,
 	for (i = 0; i < count; i++) {
 		struct buf_vector buf_vec[BUF_VECTOR_MAX];
 		uint16_t head_idx;
-		uint32_t dummy_len;
+		uint32_t buf_len;
 		uint16_t nr_vec = 0;
+		struct rte_mempool *mpool;
 		int err;
 
 		if (unlikely(fill_vec_buf_split(dev, vq,
 						vq->last_avail_idx + i,
 						&nr_vec, buf_vec,
-						&head_idx, &dummy_len,
+						&head_idx, &buf_len,
 						VHOST_ACCESS_RO) < 0))
 			break;
 
@@ -1395,15 +1397,20 @@ virtio_dev_tx_split(struct virtio_net *dev, struct vhost_virtqueue *vq,
 
 		rte_prefetch0((void *)(uintptr_t)buf_vec[0].buf_addr);
 
-		pkts[i] = rte_pktmbuf_alloc(mbuf_pool);
+		// FIXME: if (mbuf_pool64k && buf_len > mbuf_pool->elt_size)
+		if (mbuf_pool64k && buf_len > 1500)
+			mpool = mbuf_pool64k;
+		else
+			mpool = mbuf_pool;
+
+		pkts[i] = rte_pktmbuf_alloc(mpool);
 		if (unlikely(pkts[i] == NULL)) {
 			RTE_LOG(ERR, VHOST_DATA,
 				"Failed to allocate memory for mbuf.\n");
 			break;
 		}
 
-		err = copy_desc_to_mbuf(dev, vq, buf_vec, nr_vec, pkts[i],
-				mbuf_pool);
+		err = copy_desc_to_mbuf(dev, vq, buf_vec, nr_vec, pkts[i], mpool);
 		if (unlikely(err)) {
 			rte_pktmbuf_free(pkts[i]);
 			break;
@@ -1449,7 +1456,8 @@ virtio_dev_tx_split(struct virtio_net *dev, struct vhost_virtqueue *vq,
 
 static __rte_always_inline uint16_t
 virtio_dev_tx_packed(struct virtio_net *dev, struct vhost_virtqueue *vq,
-	struct rte_mempool *mbuf_pool, struct rte_mbuf **pkts, uint16_t count)
+	struct rte_mempool *mbuf_pool, struct rte_mempool *mbuf_pool64k,
+	struct rte_mbuf **pkts, uint16_t count)
 {
 	uint16_t i;
 
@@ -1491,14 +1499,15 @@ virtio_dev_tx_packed(struct virtio_net *dev, struct vhost_virtqueue *vq,
 	for (i = 0; i < count; i++) {
 		struct buf_vector buf_vec[BUF_VECTOR_MAX];
 		uint16_t buf_id;
-		uint32_t dummy_len;
+		uint32_t buf_len;
 		uint16_t desc_count, nr_vec = 0;
+		struct rte_mempool *mpool;
 		int err;
 
 		if (unlikely(fill_vec_buf_packed(dev, vq,
 						vq->last_avail_idx, &desc_count,
 						buf_vec, &nr_vec,
-						&buf_id, &dummy_len,
+						&buf_id, &buf_len,
 						VHOST_ACCESS_RO) < 0))
 			break;
 
@@ -1508,15 +1517,20 @@ virtio_dev_tx_packed(struct virtio_net *dev, struct vhost_virtqueue *vq,
 
 		rte_prefetch0((void *)(uintptr_t)buf_vec[0].buf_addr);
 
-		pkts[i] = rte_pktmbuf_alloc(mbuf_pool);
+		// FIXME: if (mbuf_pool64k && buf_len > mbuf_pool->elt_size)
+		if (mbuf_pool64k && buf_len > 1500)
+			mpool = mbuf_pool64k;
+		else
+			mpool = mbuf_pool;
+
+		pkts[i] = rte_pktmbuf_alloc(mpool);
 		if (unlikely(pkts[i] == NULL)) {
 			RTE_LOG(ERR, VHOST_DATA,
 				"Failed to allocate memory for mbuf.\n");
 			break;
 		}
 
-		err = copy_desc_to_mbuf(dev, vq, buf_vec, nr_vec, pkts[i],
-				mbuf_pool);
+		err = copy_desc_to_mbuf(dev, vq, buf_vec, nr_vec, pkts[i], mpool);
 		if (unlikely(err)) {
 			rte_pktmbuf_free(pkts[i]);
 			break;
@@ -1568,7 +1582,8 @@ virtio_dev_tx_packed(struct virtio_net *dev, struct vhost_virtqueue *vq,
 
 uint16_t
 rte_vhost_dequeue_burst(int vid, uint16_t queue_id,
-	struct rte_mempool *mbuf_pool, struct rte_mbuf **pkts, uint16_t count)
+	struct rte_mempool *mbuf_pool, struct rte_mempool *mbuf_pool64k,
+	struct rte_mbuf **pkts, uint16_t count)
 {
 	struct virtio_net *dev;
 	struct rte_mbuf *rarp_mbuf = NULL;
@@ -1640,9 +1655,11 @@ rte_vhost_dequeue_burst(int vid, uint16_t queue_id,
 	}
 
 	if (vq_is_packed(dev))
-		count = virtio_dev_tx_packed(dev, vq, mbuf_pool, pkts, count);
+		count = virtio_dev_tx_packed(dev, vq, mbuf_pool, mbuf_pool64k, pkts,
+                                     count);
 	else
-		count = virtio_dev_tx_split(dev, vq, mbuf_pool, pkts, count);
+		count = virtio_dev_tx_split(dev, vq, mbuf_pool, mbuf_pool64k, pkts,
+                                    count);
 
 out:
 	if (dev->features & (1ULL << VIRTIO_F_IOMMU_PLATFORM))
