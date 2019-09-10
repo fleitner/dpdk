@@ -739,6 +739,7 @@ monitor_all_ports_link_status(void *arg)
 	struct kni_port_params **p = kni_port_params_array;
 	int prev;
 	(void) arg;
+	int ret;
 
 	while (monitor_links) {
 		rte_delay_ms(500);
@@ -746,7 +747,13 @@ monitor_all_ports_link_status(void *arg)
 			if ((ports_mask & (1 << portid)) == 0)
 				continue;
 			memset(&link, 0, sizeof(link));
-			rte_eth_link_get_nowait(portid, &link);
+			ret = rte_eth_link_get_nowait(portid, &link);
+			if (ret < 0) {
+				RTE_LOG(ERR, APP,
+					"Get link failed (port %u): %s\n",
+					portid, rte_strerror(-ret));
+				continue;
+			}
 			for (i = 0; i < p[portid]->nb_kni; i++) {
 				prev = rte_kni_update_link(p[portid]->kni[i],
 						link.link_status);
