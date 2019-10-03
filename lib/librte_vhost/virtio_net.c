@@ -2,6 +2,7 @@
  * Copyright(c) 2010-2016 Intel Corporation
  */
 
+#include <assert.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <linux/virtio_net.h>
@@ -1289,12 +1290,19 @@ again:
 	return NULL;
 }
 
+static void
+virtio_dev_extbuf_free(void *addr __rte_unused, void *opaque)
+{
+	rte_free(opaque);
+}
+
 static __rte_noinline uint16_t
 virtio_dev_tx_split(struct virtio_net *dev, struct vhost_virtqueue *vq,
 	struct rte_mempool *mbuf_pool, struct rte_mbuf **pkts, uint16_t count)
 {
 	uint16_t i;
 	uint16_t free_entries;
+	uint16_t mbuf_avail;
 
 	if (unlikely(dev->dequeue_zero_copy)) {
 		struct zcopy_mbuf *zmbuf, *next;
@@ -1340,17 +1348,18 @@ virtio_dev_tx_split(struct virtio_net *dev, struct vhost_virtqueue *vq,
 	VHOST_LOG_DEBUG(VHOST_DATA, "(%d) about to dequeue %u buffers\n",
 			dev->vid, count);
 
+	mbuf_avail = rte_pktmbuf_data_room_size(mbuf_pool) - RTE_PKTMBUF_HEADROOM;
 	for (i = 0; i < count; i++) {
 		struct buf_vector buf_vec[BUF_VECTOR_MAX];
 		uint16_t head_idx;
-		uint32_t dummy_len;
+		uint32_t buf_len;
 		uint16_t nr_vec = 0;
 		int err;
 
 		if (unlikely(fill_vec_buf_split(dev, vq,
 						vq->last_avail_idx + i,
 						&nr_vec, buf_vec,
-						&head_idx, &dummy_len,
+						&head_idx, &buf_len,
 						VHOST_ACCESS_RO) < 0))
 			break;
 
@@ -1362,6 +1371,35 @@ virtio_dev_tx_split(struct virtio_net *dev, struct vhost_virtqueue *vq,
 			RTE_LOG(ERR, VHOST_DATA,
 				"Failed to allocate memory for mbuf.\n");
 			break;
+		}
+
+		if (buf_len > mbuf_avail) {
+			/* Buffer is too large to use mpool */
+			struct rte_mbuf_ext_shared_info *extbuf_shinfo;
+			rte_iova_t extbuf_iova;
+			uint32_t extbuf_len;
+			void *extbuf;
+
+			extbuf_len = buf_len + RTE_PKTMBUF_HEADROOM;
+			if (extbuf_len > UINT16_MAX)
+				RTE_LOG(ERR, VHOST_CONFIG, "oversized buffer %u.\n", extbuf_len);
+
+			extbuf = rte_malloc(NULL, extbuf_len, RTE_CACHE_LINE_SIZE);
+			if (extbuf) {
+				/* FIXME: make sure mbuf has enough space */
+				extbuf_shinfo = rte_pktmbuf_mtod(pkts[i],
+											 struct rte_mbuf_ext_shared_info *);
+
+				extbuf_shinfo->free_cb = virtio_dev_extbuf_free;
+				extbuf_shinfo->fcb_opaque = extbuf;
+				extbuf_iova = rte_mempool_virt2iova(extbuf);
+				rte_mbuf_ext_refcnt_set(extbuf_shinfo, 1);
+				rte_pktmbuf_attach_extbuf(pkts[i], extbuf, extbuf_iova,
+										  extbuf_len, extbuf_shinfo);
+
+				rte_pktmbuf_reset_headroom(pkts[i]);
+				assert(pkts[i]->ol_flags == EXT_ATTACHED_MBUF);
+			}
 		}
 
 		err = copy_desc_to_mbuf(dev, vq, buf_vec, nr_vec, pkts[i],
@@ -1414,6 +1452,7 @@ virtio_dev_tx_packed(struct virtio_net *dev, struct vhost_virtqueue *vq,
 	struct rte_mempool *mbuf_pool, struct rte_mbuf **pkts, uint16_t count)
 {
 	uint16_t i;
+	uint16_t mbuf_avail;
 
 	if (unlikely(dev->dequeue_zero_copy)) {
 		struct zcopy_mbuf *zmbuf, *next;
@@ -1448,17 +1487,18 @@ virtio_dev_tx_packed(struct virtio_net *dev, struct vhost_virtqueue *vq,
 	VHOST_LOG_DEBUG(VHOST_DATA, "(%d) about to dequeue %u buffers\n",
 			dev->vid, count);
 
+	mbuf_avail = rte_pktmbuf_data_room_size(mbuf_pool) - RTE_PKTMBUF_HEADROOM;
 	for (i = 0; i < count; i++) {
 		struct buf_vector buf_vec[BUF_VECTOR_MAX];
 		uint16_t buf_id;
-		uint32_t dummy_len;
+		uint32_t buf_len;
 		uint16_t desc_count, nr_vec = 0;
 		int err;
 
 		if (unlikely(fill_vec_buf_packed(dev, vq,
 						vq->last_avail_idx, &desc_count,
 						buf_vec, &nr_vec,
-						&buf_id, &dummy_len,
+						&buf_id, &buf_len,
 						VHOST_ACCESS_RO) < 0))
 			break;
 
@@ -1471,6 +1511,35 @@ virtio_dev_tx_packed(struct virtio_net *dev, struct vhost_virtqueue *vq,
 			RTE_LOG(ERR, VHOST_DATA,
 				"Failed to allocate memory for mbuf.\n");
 			break;
+		}
+
+		if (buf_len > mbuf_avail) {
+			/* Buffer is too large to use mpool */
+			struct rte_mbuf_ext_shared_info *extbuf_shinfo;
+			rte_iova_t extbuf_iova;
+			uint32_t extbuf_len;
+			void *extbuf;
+
+			extbuf_len = buf_len + RTE_PKTMBUF_HEADROOM;
+			if (extbuf_len > UINT16_MAX)
+				RTE_LOG(ERR, VHOST_CONFIG, "oversized buffer %u.\n", extbuf_len);
+
+			extbuf = rte_malloc(NULL, extbuf_len, RTE_CACHE_LINE_SIZE);
+			if (extbuf) {
+				/* FIXME: make sure mbuf has enough space */
+				extbuf_shinfo = rte_pktmbuf_mtod(pkts[i],
+											 struct rte_mbuf_ext_shared_info *);
+
+				extbuf_shinfo->free_cb = virtio_dev_extbuf_free;
+				extbuf_shinfo->fcb_opaque = extbuf;
+				extbuf_iova = rte_mempool_virt2iova(extbuf);
+				rte_mbuf_ext_refcnt_set(extbuf_shinfo, 1);
+				rte_pktmbuf_attach_extbuf(pkts[i], extbuf, extbuf_iova,
+										  extbuf_len, extbuf_shinfo);
+
+				rte_pktmbuf_reset_headroom(pkts[i]);
+				assert(pkts[i]->ol_flags == EXT_ATTACHED_MBUF);
+			}
 		}
 
 		err = copy_desc_to_mbuf(dev, vq, buf_vec, nr_vec, pkts[i],
