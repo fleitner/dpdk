@@ -2,6 +2,7 @@
  * Copyright(c) 2010-2016 Intel Corporation
  */
 
+#include <assert.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <linux/virtio_net.h>
@@ -1289,6 +1290,96 @@ again:
 	return NULL;
 }
 
+static void
+virtio_dev_extbuf_free(void *addr __rte_unused, void *opaque)
+{
+	rte_free(opaque);
+}
+
+static int
+virtio_dev_extbuf_alloc(struct rte_mbuf *pkt, uint16_t size)
+{
+	struct rte_mbuf_ext_shared_info *shinfo;
+	uint16_t buf_len;
+	rte_iova_t iova;
+	void *buf;
+
+	shinfo = NULL;
+	buf_len = size + RTE_PKTMBUF_HEADROOM;
+
+	/* Try to use pkt buffer to store shinfo to reduce the amount of memory
+	 * required, otherwise store shinfo in the new buffer.
+	 */
+	if (rte_pktmbuf_tailroom(pkt) > sizeof(*shinfo))
+		shinfo = rte_pktmbuf_mtod(pkt,
+					  struct rte_mbuf_ext_shared_info *);
+	else {
+		if (unlikely(buf_len + sizeof(shinfo) > UINT16_MAX)) {
+			RTE_LOG(ERR, VHOST_DATA,
+				"buffer size exceeded maximum.\n");
+			return -ENOSPC;
+		}
+
+		buf_len += sizeof(shinfo);
+	}
+
+	buf = rte_malloc(NULL, buf_len, RTE_CACHE_LINE_SIZE);
+	if (unlikely(buf == NULL)) {
+		RTE_LOG(ERR, VHOST_DATA,
+				"Failed to allocate memory for mbuf.\n");
+		return -ENOMEM;
+	}
+
+	/* initialize shinfo */
+	if (shinfo) {
+		shinfo->free_cb = virtio_dev_extbuf_free;
+		shinfo->fcb_opaque = buf;
+		rte_mbuf_ext_refcnt_set(shinfo, 1);
+	} else {
+		shinfo = rte_pktmbuf_ext_shinfo_init_helper(buf, &buf_len,
+					      virtio_dev_extbuf_free, buf);
+		assert(shinfo);
+	}
+
+	iova = rte_mempool_virt2iova(buf);
+	rte_pktmbuf_attach_extbuf(pkt, buf, iova, buf_len, shinfo);
+	rte_pktmbuf_reset_headroom(pkt);
+	assert(pkt->ol_flags == EXT_ATTACHED_MBUF);
+
+	return 0;
+}
+
+/*
+ * Allocate a host supported pktmbuf.
+ */
+static __rte_always_inline struct rte_mbuf *
+virtio_dev_pktmbuf_alloc(struct virtio_net *dev, struct rte_mempool *mp,
+			 uint16_t data_len)
+{
+	struct rte_mbuf *pkt = rte_pktmbuf_alloc(mp);
+
+	if (unlikely(pkt == NULL))
+		return NULL;
+
+	if (rte_pktmbuf_tailroom(pkt) >= data_len)
+		return pkt;
+
+	/* attach an external buffer if supported */
+	if (dev->extbuf && !virtio_dev_extbuf_alloc(pkt, data_len))
+		return pkt;
+
+	/* check if chained buffers are allowed */
+	if (!dev->linearbuf)
+		return pkt;
+
+	/* Data doesn't fit into the buffer and the host supports
+	 * only linear buffers
+	 */
+	rte_pktmbuf_free(pkt);
+
+	return NULL;
+}
+
 static __rte_noinline uint16_t
 virtio_dev_tx_split(struct virtio_net *dev, struct vhost_virtqueue *vq,
 	struct rte_mempool *mbuf_pool, struct rte_mbuf **pkts, uint16_t count)
@@ -1343,21 +1434,21 @@ virtio_dev_tx_split(struct virtio_net *dev, struct vhost_virtqueue *vq,
 	for (i = 0; i < count; i++) {
 		struct buf_vector buf_vec[BUF_VECTOR_MAX];
 		uint16_t head_idx;
-		uint32_t dummy_len;
+		uint32_t buf_len;
 		uint16_t nr_vec = 0;
 		int err;
 
 		if (unlikely(fill_vec_buf_split(dev, vq,
 						vq->last_avail_idx + i,
 						&nr_vec, buf_vec,
-						&head_idx, &dummy_len,
+						&head_idx, &buf_len,
 						VHOST_ACCESS_RO) < 0))
 			break;
 
 		if (likely(dev->dequeue_zero_copy == 0))
 			update_shadow_used_ring_split(vq, head_idx, 0);
 
-		pkts[i] = rte_pktmbuf_alloc(mbuf_pool);
+		pkts[i] = virtio_dev_pktmbuf_alloc(dev, mbuf_pool, buf_len);
 		if (unlikely(pkts[i] == NULL)) {
 			RTE_LOG(ERR, VHOST_DATA,
 				"Failed to allocate memory for mbuf.\n");
@@ -1451,14 +1542,14 @@ virtio_dev_tx_packed(struct virtio_net *dev, struct vhost_virtqueue *vq,
 	for (i = 0; i < count; i++) {
 		struct buf_vector buf_vec[BUF_VECTOR_MAX];
 		uint16_t buf_id;
-		uint32_t dummy_len;
+		uint32_t buf_len;
 		uint16_t desc_count, nr_vec = 0;
 		int err;
 
 		if (unlikely(fill_vec_buf_packed(dev, vq,
 						vq->last_avail_idx, &desc_count,
 						buf_vec, &nr_vec,
-						&buf_id, &dummy_len,
+						&buf_id, &buf_len,
 						VHOST_ACCESS_RO) < 0))
 			break;
 
@@ -1466,7 +1557,7 @@ virtio_dev_tx_packed(struct virtio_net *dev, struct vhost_virtqueue *vq,
 			update_shadow_used_ring_packed(vq, buf_id, 0,
 					desc_count);
 
-		pkts[i] = rte_pktmbuf_alloc(mbuf_pool);
+		pkts[i] = virtio_dev_pktmbuf_alloc(dev, mbuf_pool, buf_len);
 		if (unlikely(pkts[i] == NULL)) {
 			RTE_LOG(ERR, VHOST_DATA,
 				"Failed to allocate memory for mbuf.\n");
