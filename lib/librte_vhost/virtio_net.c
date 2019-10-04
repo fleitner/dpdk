@@ -1296,6 +1296,60 @@ virtio_dev_extbuf_free(void *addr __rte_unused, void *opaque)
 	rte_free(opaque);
 }
 
+static int
+virtio_dev_extbuf_alloc(struct rte_mbuf *pkt, uint16_t size)
+{
+	struct rte_mbuf_ext_shared_info *shinfo;
+	uint16_t buf_len;
+	rte_iova_t iova;
+	void *buf;
+
+	shinfo = NULL;
+	buf_len = size + RTE_PKTMBUF_HEADROOM;
+
+	/* Try to use pkt buffer to store shinfo to reduce the amount of memory
+	 * required, otherwise store shinfo in the new buffer.
+	 */
+	if (rte_pktmbuf_tailroom(pkt) > sizeof(*shinfo))
+		shinfo = rte_pktmbuf_mtod(pkt,
+					  struct rte_mbuf_ext_shared_info *);
+	else {
+		if (unlikely(buf_len + sizeof(shinfo) > UINT16_MAX)) {
+			RTE_LOG(ERR, VHOST_DATA,
+				"buffer size exceeded maximum.\n");
+			return -ENOSPC;
+		}
+
+		buf_len += sizeof(shinfo);
+	}
+
+	buf = rte_malloc(NULL, buf_len, RTE_CACHE_LINE_SIZE);
+	if (unlikely(buf == NULL)) {
+		RTE_LOG(ERR, VHOST_DATA,
+				"Failed to allocate memory for mbuf.\n");
+		return -ENOMEM;
+	}
+
+	/* initialize shinfo */
+	if (shinfo) {
+		shinfo->free_cb = virtio_dev_extbuf_free;
+		shinfo->fcb_opaque = buf;
+		rte_mbuf_ext_refcnt_set(shinfo, 1);
+	} else {
+		shinfo = rte_pktmbuf_ext_shinfo_init_helper(buf, &buf_len,
+					      virtio_dev_extbuf_free, buf);
+		assert(shinfo);
+	}
+
+	iova = rte_mempool_virt2iova(buf);
+	rte_pktmbuf_attach_extbuf(pkt, buf, iova, buf_len, shinfo);
+	rte_pktmbuf_reset_headroom(pkt);
+	assert(pkt->ol_flags == EXT_ATTACHED_MBUF);
+
+	return 0;
+}
+
+
 static __rte_noinline uint16_t
 virtio_dev_tx_split(struct virtio_net *dev, struct vhost_virtqueue *vq,
 	struct rte_mempool *mbuf_pool, struct rte_mbuf **pkts, uint16_t count)
@@ -1373,35 +1427,11 @@ virtio_dev_tx_split(struct virtio_net *dev, struct vhost_virtqueue *vq,
 			break;
 		}
 
-		if (buf_len > mbuf_avail) {
-			/* Buffer is too large to use mpool */
-			struct rte_mbuf_ext_shared_info *extbuf_shinfo;
-			rte_iova_t extbuf_iova;
-			uint32_t extbuf_len;
-			void *extbuf;
+		/* FIXME: disable/enable logic */
+		if (buf_len > mbuf_avail)
+			virtio_dev_extbuf_alloc(pkts[i], buf_len);
 
-			extbuf_len = buf_len + RTE_PKTMBUF_HEADROOM;
-			if (extbuf_len > UINT16_MAX)
-				RTE_LOG(ERR, VHOST_CONFIG, "oversized buffer %u.\n", extbuf_len);
-
-			extbuf = rte_malloc(NULL, extbuf_len, RTE_CACHE_LINE_SIZE);
-			if (extbuf) {
-				/* FIXME: make sure mbuf has enough space */
-				extbuf_shinfo = rte_pktmbuf_mtod(pkts[i],
-											 struct rte_mbuf_ext_shared_info *);
-
-				extbuf_shinfo->free_cb = virtio_dev_extbuf_free;
-				extbuf_shinfo->fcb_opaque = extbuf;
-				extbuf_iova = rte_mempool_virt2iova(extbuf);
-				rte_mbuf_ext_refcnt_set(extbuf_shinfo, 1);
-				rte_pktmbuf_attach_extbuf(pkts[i], extbuf, extbuf_iova,
-										  extbuf_len, extbuf_shinfo);
-
-				rte_pktmbuf_reset_headroom(pkts[i]);
-				assert(pkts[i]->ol_flags == EXT_ATTACHED_MBUF);
-			}
-		}
-
+		/* FIXME: if non-linear buffer is disabled, return here */
 		err = copy_desc_to_mbuf(dev, vq, buf_vec, nr_vec, pkts[i],
 				mbuf_pool);
 		if (unlikely(err)) {
@@ -1513,35 +1543,11 @@ virtio_dev_tx_packed(struct virtio_net *dev, struct vhost_virtqueue *vq,
 			break;
 		}
 
-		if (buf_len > mbuf_avail) {
-			/* Buffer is too large to use mpool */
-			struct rte_mbuf_ext_shared_info *extbuf_shinfo;
-			rte_iova_t extbuf_iova;
-			uint32_t extbuf_len;
-			void *extbuf;
+		/* FIXME: disable/enable logic */
+		if (buf_len > mbuf_avail)
+			virtio_dev_extbuf_alloc(pkts[i], buf_len);
 
-			extbuf_len = buf_len + RTE_PKTMBUF_HEADROOM;
-			if (extbuf_len > UINT16_MAX)
-				RTE_LOG(ERR, VHOST_CONFIG, "oversized buffer %u.\n", extbuf_len);
-
-			extbuf = rte_malloc(NULL, extbuf_len, RTE_CACHE_LINE_SIZE);
-			if (extbuf) {
-				/* FIXME: make sure mbuf has enough space */
-				extbuf_shinfo = rte_pktmbuf_mtod(pkts[i],
-											 struct rte_mbuf_ext_shared_info *);
-
-				extbuf_shinfo->free_cb = virtio_dev_extbuf_free;
-				extbuf_shinfo->fcb_opaque = extbuf;
-				extbuf_iova = rte_mempool_virt2iova(extbuf);
-				rte_mbuf_ext_refcnt_set(extbuf_shinfo, 1);
-				rte_pktmbuf_attach_extbuf(pkts[i], extbuf, extbuf_iova,
-										  extbuf_len, extbuf_shinfo);
-
-				rte_pktmbuf_reset_headroom(pkts[i]);
-				assert(pkts[i]->ol_flags == EXT_ATTACHED_MBUF);
-			}
-		}
-
+		/* FIXME: if non-linear buffer is disabled, return here */
 		err = copy_desc_to_mbuf(dev, vq, buf_vec, nr_vec, pkts[i],
 				mbuf_pool);
 		if (unlikely(err)) {
