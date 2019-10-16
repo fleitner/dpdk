@@ -106,6 +106,7 @@ New Features
   * Added support for the ``RTE_ETH_DEV_CLOSE_REMOVE`` flag.
   * Generic filter enhancement
     - Supported pipeline mode.
+    - Supported new packet type like PPPoE for switch filter.
 
 * **Updated the enic driver.**
 
