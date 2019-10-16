@@ -104,6 +104,8 @@ New Features
   * Added support for handling Receive Flex Descriptor.
   * Added support for protocol extraction on per Rx queue.
   * Added support for the ``RTE_ETH_DEV_CLOSE_REMOVE`` flag.
+  * Generic filter enhancement
+    - Supported pipeline mode.
 
 * **Updated the enic driver.**
 
