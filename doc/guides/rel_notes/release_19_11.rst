@@ -109,6 +109,10 @@ New Features
     - Supported pipeline mode.
     - Supported new packet type like PPPoE for switch filter.
 
+* **Updated iavf PMD.**
+
+  Enable AVX2 data path for iavf PMD.
+
 * **Updated the enic driver.**
 
   * Added support for Geneve with options offload.
