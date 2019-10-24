@@ -209,6 +209,10 @@ Removed Items
 
    * Removed AF_XDP pmd_zero copy vdev argument. Support is now auto-detected.
 
+* **Removed Vhost-scsi example.**
+
+  Removed the Vhost-scsi example as it won't be maintained anymore by SPDK.
+  Vhost-blk example is to be used as drop-in replacement.
 
 API Changes
 -----------
